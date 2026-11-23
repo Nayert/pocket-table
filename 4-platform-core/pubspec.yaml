@@ -1,0 +1,14 @@
+name: platform_core
+description: Lobby, player sessions, game picker and action validation for the party game host.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  transport:
+    path: ../3-transport
+
+dev_dependencies:
+  test: ^1.25.0

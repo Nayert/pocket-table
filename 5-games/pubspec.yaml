@@ -1,0 +1,14 @@
+name: games
+description: Game plugins (Mafia, Poker) for the party game platform.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  platform_core:
+    path: ../4-platform-core
+
+dev_dependencies:
+  test: ^1.25.0

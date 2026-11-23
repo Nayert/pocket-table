@@ -1,0 +1,31 @@
+name: host_app
+description: Host app for the party game platform. Runs the lobby and games on one phone.
+version: 0.1.0+1
+publish_to: none
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  qr_flutter: ^4.1.0
+  wakelock_plus: ^1.2.8
+  shared_preferences: ^2.3.0
+  transport:
+    path: ../3-transport
+  platform_core:
+    path: ../4-platform-core
+  games:
+    path: ../5-games
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    # Copy of 1-player-client, served to players in Local mode.
+    # Refresh it with tool/copy_player_client.sh after editing the player page.
+    - assets/player_client/

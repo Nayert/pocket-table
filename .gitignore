@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+.venv/
+.pytest_cache/
+
+# Dart / Flutter
+.dart_tool/
+build/
+pubspec.lock
+.flutter-plugins
+.flutter-plugins-dependencies

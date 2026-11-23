@@ -1,0 +1,77 @@
+# Layer 6: Host App UI
+
+**Tech:** Dart (Flutter)
+**Runs on:** the host phone
+
+## What it does
+
+- **Mode choice:** Local (same Wi-Fi) or Online (via relay)
+- **Lobby screen:** QR code / room code, player list as people join, game picker, settings, Start button
+- **Table / TV view during the game:** whatever the current game's `publicState()` describes — Mafia narrator view, poker table with pot and community cards
+- **Host controls:** pause, end game, kick a player, back to lobby
+
+## What it needs from other layers
+
+| From | Needs |
+|------|-------|
+| **4 Platform core** | Observable state (lobby players, selected game, current `publicState()`, connection status) and commands (`chooseMode`, `pickGame`, `updateSettings`, `startGame`, `endGame`, `kick`) |
+| **3 Transport** (via core) | `joinInfo`: the URL/room code to turn into a QR code |
+| **5 Games** (via core) | A host-view widget per game, or a `publicState()` shape the UI knows how to draw |
+
+## What it provides to other layers
+
+- User intent to **4 Platform core** (button presses become core commands)
+- Nothing to the network — the UI never touches sockets
+
+## What it does NOT do
+
+- No game rules and no validation — it only displays state and forwards the host's choices.
+- If the host is also playing, their private info still goes through their own player client, not this screen (everyone can see the host phone).
+
+## Key notes
+
+- **Wakelock** to keep the screen on while hosting.
+- **Local network permission** on iPhone for Local mode.
+- Big, readable text on the table view; it's meant to be seen from across a room.
+- Option to **cast to a TV** later — keep the table view a separate widget so it can be shown on another display.
+
+## Files
+
+```
+6-host-app-ui/
+  pubspec.yaml                       # depends on transport, platform_core, games by path
+  lib/main.dart                      # picks the screen from the platform's state
+  lib/host_controller.dart           # wraps Platform for Flutter, wakelock, saves relay URL
+  lib/screens/mode_select_screen.dart
+  lib/screens/lobby_screen.dart      # QR, room code, players, game picker, settings
+  lib/screens/table_screen.dart      # draws any game's publicState()
+  lib/widgets/playing_card.dart
+  assets/player_client/              # copy of 1-player-client, served in Local mode
+  tool/copy_player_client.sh         # refresh that copy
+```
+
+There are no per-game host views yet: `table_screen.dart` draws every game from the standard `publicState()` keys. Add a custom view later if a game needs one.
+
+## First-time setup
+
+The Android/iOS project folders aren't included (Flutter generates them). From this folder:
+
+```bash
+flutter create . --project-name host_app --platforms android,ios
+flutter pub get
+flutter run            # with your phone plugged in
+```
+
+`flutter create .` keeps the existing `lib/` and `pubspec.yaml`. Then add these permissions:
+
+- **Android** – `android/app/src/main/AndroidManifest.xml`, inside `<manifest>`:
+  ```xml
+  <uses-permission android:name="android.permission.INTERNET"/>
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+  ```
+  and on the `<application>` tag add `android:usesCleartextTraffic="true"` (Local mode uses plain http on your Wi-Fi; testing Online against a non-https relay needs it too).
+- **iOS** – `ios/Runner/Info.plist`:
+  ```xml
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Players on your Wi-Fi connect to this phone to join the game.</string>
+  ```
