@@ -14,23 +14,40 @@ class _Seat {
   bool folded = false;
   bool allIn = false;
   bool acted = false;
+  bool mayRaise = true; // false once they've acted since the last full raise
   int roundBet = 0; // chips put in on this street
   int handBet = 0; // chips put in this hand (for side pots)
   bool readyForNext = false;
   bool connected = true;
+  bool left = false; // left for good (kicked or pressed Leave)
 
   String get id => player.id;
   String get name => player.name;
   bool get live => !folded && hole.isNotEmpty; // still in this hand
   bool get canAct => live && !allIn;
+  bool get canPlay => chips > 0 && !left && connected; // can be dealt into the next hand
 }
 
-enum _Phase { betting, handOver, over }
+enum _Phase { betting, handOver, waiting, over }
 
 const _streetNames = ['Pre-flop', 'Flop', 'Turn', 'River'];
+const _waitingTitle = 'Waiting for players to reconnect';
+
+/// How long a disconnected player's turn waits before it is auto-played.
+const _disconnectedGraceSeconds = 20;
 
 /// No-limit Texas Hold'em with play chips.
 class PokerGame extends Game {
+  /// [deckForTesting] and [dealerForTesting] are for tests only: a fixed deck
+  /// (cards are dealt from the END of the list, like poker.py) and the first
+  /// dealer's seat. [chipsForTesting] gives named players different starting
+  /// stacks. By default the deck is shuffled with the platform's secure random.
+  PokerGame({this.deckForTesting, this.dealerForTesting, this.chipsForTesting});
+
+  final List<String>? deckForTesting;
+  final int? dealerForTesting;
+  final Map<String, int>? chipsForTesting;
+
   @override
   String get id => 'poker';
   @override
@@ -83,8 +100,8 @@ class PokerGame extends Game {
     _turnSeconds = settings['turnSeconds'] as int? ?? 60;
     _seats
       ..clear()
-      ..addAll(players.map((p) => _Seat(p, chips)));
-    _dealer = ctx.random.nextInt(_seats.length) - 1; // first hand moves it on by one
+      ..addAll(players.map((p) => _Seat(p, chipsForTesting?[p.id] ?? chips)));
+    _dealer = (dealerForTesting ?? ctx.random.nextInt(_seats.length)) - 1; // first hand moves it on by one
     _startHand();
   }
 
@@ -96,8 +113,54 @@ class PokerGame extends Game {
 
   @override
   void onPlayerConnectionChanged(String playerId, bool connected) {
-    _seatOf(playerId)?.connected = connected;
+    final s = _seatOf(playerId);
+    if (s == null) return;
+    final before = (_phase, _hand, _toAct, _street);
+    s.connected = connected;
+    if (connected && _phase == _Phase.waiting) {
+      _startHand();
+    } else if (!connected && _phase == _Phase.handOver && _allReady()) {
+      _startHand();
+    } else if (_phase == _Phase.betting && _toAct >= 0 && _seats[_toAct] == s) {
+      _setTurnTimer(); // grace timer for a disconnected player, normal one when they're back
+    }
+    if (before != (_phase, _hand, _toAct, _street)) _ctx.requestUpdate();
   }
+
+  /// Left for good (kicked or pressed Leave): fold now, never dealt in again.
+  @override
+  void onPlayerRemoved(String playerId) {
+    final s = _seatOf(playerId);
+    if (s == null || s.left) return;
+    s.left = true;
+    s.connected = false;
+    _log.add('${s.name} left the game.');
+    if (_phase == _Phase.betting && s.live) {
+      if (_seats[_toAct] == s) {
+        handleAction(s.id, PlayerAction(actionId: _actionId, choice: const ['fold']));
+      } else {
+        s.folded = true;
+        final live = _seats.where((x) => x.live).toList();
+        if (live.length == 1) {
+          _winUncontested(live.single);
+        } else if (_roundDone()) {
+          _nextStreet();
+        }
+      }
+    } else if (_phase == _Phase.handOver || _phase == _Phase.waiting) {
+      if (_seats.where((x) => x.chips > 0 && !x.left).length < 2) {
+        _startHand(); // game over
+      } else if (_phase == _Phase.handOver && _allReady()) {
+        _startHand();
+      }
+    }
+    _ctx.requestUpdate();
+  }
+
+  bool _allReady() => _seats.where((x) => x.canPlay).every((x) => x.readyForNext);
+
+  /// Test-only: what happens when the turn / next-hand timer runs out.
+  void timeoutForTesting() => _onTimeout();
 
   // ------------------------------------------------------------- dealing
 
@@ -110,12 +173,18 @@ class PokerGame extends Game {
   }
 
   void _startHand() {
-    final withChips = _seats.where((s) => s.chips > 0).length;
-    if (withChips < 2) {
+    final withChips = _seats.where((s) => s.chips > 0 && !s.left).toList();
+    if (withChips.length < 2) {
       _phase = _Phase.over;
+      _toAct = -1;
       _setTimer(null);
-      final winner = _seats.firstWhere((s) => s.chips > 0, orElse: () => _seats.first);
-      _log.add('${winner.name} wins the game!');
+      _log.add(withChips.isEmpty ? 'Game over.' : '${withChips.single.name} wins the game!');
+      return;
+    }
+    if (_seats.where((s) => s.canPlay).length < 2) {
+      _phase = _Phase.waiting; // someone has to reconnect first
+      _toAct = -1;
+      _setTimer(null);
       return;
     }
 
@@ -125,25 +194,26 @@ class PokerGame extends Game {
     _board.clear();
     _shownHands.clear();
     _lastResult = [];
-    _deck = shuffledDeck(_ctx.random);
+    _deck = deckForTesting != null ? [...deckForTesting!] : shuffledDeck(_ctx.random);
     for (final s in _seats) {
       s
         ..hole = []
         ..folded = false
         ..allIn = false
         ..acted = false
+        ..mayRaise = true
         ..roundBet = 0
         ..handBet = 0
         ..readyForNext = false;
     }
-    final inHand = <_Seat>[for (final s in _seats) if (s.chips > 0) s];
+    final inHand = <_Seat>[for (final s in _seats) if (s.canPlay) s];
     for (var round = 0; round < 2; round++) {
       for (final s in inHand) {
         s.hole.add(_deck.removeLast());
       }
     }
 
-    _dealer = _next(_dealer, (s) => s.chips > 0);
+    _dealer = _next(_dealer, (s) => s.live);
     final headsUp = inHand.length == 2;
     final sb = headsUp ? _dealer : _next(_dealer, (s) => s.live);
     final bb = _next(sb, (s) => s.live);
@@ -176,8 +246,10 @@ class PokerGame extends Game {
 
   // ------------------------------------------------------------- betting
 
-  ({List<Option> options, int toCall, int minTo, int maxTo}) _optionsFor(_Seat s) {
+  ({List<Option> options, int toCall, int minTo, int maxTo, bool canRaise}) _optionsFor(_Seat s) {
     final toCall = _currentBet - s.roundBet;
+    final othersCanAct = _seats.any((o) => o != s && o.canAct);
+    final canRaise = s.chips > toCall && s.mayRaise && othersCanAct;
     final options = <Option>[const Option('fold', 'Fold')];
     if (toCall <= 0) {
       options.add(const Option('check', 'Check'));
@@ -188,7 +260,7 @@ class PokerGame extends Game {
     final maxTo = s.roundBet + s.chips;
     final fullMinTo = _currentBet + _minRaise;
     final minTo = fullMinTo < maxTo ? fullMinTo : maxTo;
-    if (s.chips > toCall) {
+    if (canRaise) {
       options.add(Option(
         'raise',
         _currentBet == 0 ? 'Bet' : 'Raise',
@@ -202,7 +274,7 @@ class PokerGame extends Game {
         ),
       ));
     }
-    return (options: options, toCall: toCall, minTo: minTo, maxTo: maxTo);
+    return (options: options, toCall: toCall, minTo: minTo, maxTo: maxTo, canRaise: canRaise);
   }
 
   String get _actionId => 'h$_hand-a$_actionCount';
@@ -214,11 +286,12 @@ class PokerGame extends Game {
 
     if (_phase == _Phase.handOver) {
       if (action.first != 'next') return const ActionResult.error('Wait for the next hand.');
+      if (!s.canPlay) return const ActionResult.error("You're out of chips.");
       s.readyForNext = true;
-      final waiting = _seats.where((x) => x.chips > 0 && x.connected && !x.readyForNext);
-      if (waiting.isEmpty) _startHand();
+      if (_allReady()) _startHand();
       return const ActionResult.ok();
     }
+    if (_phase == _Phase.waiting) return const ActionResult.error('Wait for the next hand.');
     if (_phase != _Phase.betting) return const ActionResult.error('The game is over.');
     if (_toAct < 0 || _seats[_toAct] != s) return const ActionResult.error("It's not your turn.");
     if (action.actionId != _actionId) return const ActionResult.error('That turn has passed.');
@@ -237,23 +310,29 @@ class PokerGame extends Game {
         _post(s, o.toCall);
         _log.add('${s.name} calls ${before - s.chips}${s.allIn ? ' (all in)' : ''}.');
       case 'raise':
-        final to = action.intValue;
-        if (s.chips <= o.toCall) return const ActionResult.error("You don't have enough to raise.");
+        if (!o.canRaise) return const ActionResult.error("You can't raise now.");
+        final v = action.value;
+        final to = v is num && v == v.roundToDouble() ? v.toInt() : null; // whole numbers only
         if (to == null || to < o.minTo || to > o.maxTo) {
           return ActionResult.error('Raise to between ${o.minTo} and ${o.maxTo}.');
         }
         _post(s, to - s.roundBet);
         final raiseBy = to - _currentBet;
-        if (raiseBy >= _minRaise) _minRaise = raiseBy;
+        final full = raiseBy >= _minRaise;
+        if (full) _minRaise = raiseBy; // a short all-in doesn't change the minimum
         _currentBet = to;
         for (final other in _seats) {
-          if (other != s) other.acted = false; // everyone has to respond again
+          if (other != s) {
+            other.acted = false; // everyone has to respond again
+            if (full) other.mayRaise = true; // a full raise reopens the betting
+          }
         }
         _log.add('${s.name} ${raiseBy == to ? 'bets' : 'raises to'} $to${s.allIn ? ' (all in)' : ''}.');
       default:
         return const ActionResult.error('Unknown move.');
     }
     s.acted = true;
+    s.mayRaise = false;
     _advance();
     return const ActionResult.ok();
   }
@@ -263,12 +342,7 @@ class PokerGame extends Game {
     final live = _seats.where((s) => s.live).toList();
     if (live.length == 1) return _winUncontested(live.single);
 
-    final actors = _seats.where((s) => s.canAct).toList();
-    final roundDone = actors.every((s) => s.acted && s.roundBet == _currentBet) ||
-        actors.isEmpty ||
-        (actors.length == 1 && actors.single.roundBet >= _currentBet);
-
-    if (!roundDone) {
+    if (!_roundDone()) {
       _toAct = _next(_toAct, (s) => s.canAct && (!s.acted || s.roundBet < _currentBet));
       _afterChange();
       return;
@@ -276,10 +350,18 @@ class PokerGame extends Game {
     _nextStreet();
   }
 
+  bool _roundDone() {
+    final actors = _seats.where((s) => s.canAct).toList();
+    return actors.isEmpty ||
+        actors.every((s) => s.acted && s.roundBet == _currentBet) ||
+        (actors.length == 1 && actors.single.roundBet >= _currentBet);
+  }
+
   void _nextStreet() {
     for (final s in _seats) {
       s
         ..roundBet = 0
+        ..mayRaise = true
         ..acted = false;
     }
     _currentBet = 0;
@@ -338,23 +420,43 @@ class PokerGame extends Game {
       s
         ..handBet = 0
         ..roundBet = 0;
+      if (s.hole.isNotEmpty && s.chips == 0 && !s.left) _log.add('${s.name} is out of chips.');
     }
     _toAct = -1;
-    if (_seats.where((s) => s.chips > 0).length < 2) {
+    if (_seats.where((s) => s.chips > 0 && !s.left).length < 2) {
       _startHand(); // sets the game over
       return;
     }
     _phase = _Phase.handOver;
-    _setTimer(const Duration(seconds: 12), _startHand);
+    _setTimer(const Duration(seconds: 12), _onTimeout);
   }
 
   /// Start the right timer for the new state.
   void _afterChange() {
     _actionCount++;
-    if (_phase == _Phase.betting && _toAct >= 0 && _turnSeconds > 0) {
-      _setTimer(Duration(seconds: _turnSeconds), _autoAct);
+    if (_phase == _Phase.betting && _toAct >= 0) {
+      _setTurnTimer();
     } else if (_phase == _Phase.betting) {
       _setTimer(null);
+    }
+  }
+
+  /// Timer for the seat to act: the turn limit, or a grace period (at most 20s)
+  /// if that player is disconnected.
+  void _setTurnTimer() {
+    var secs = _turnSeconds > 0 ? _turnSeconds : null;
+    if (!_seats[_toAct].connected) {
+      secs = _turnSeconds > 0 && _turnSeconds < _disconnectedGraceSeconds ? _turnSeconds : _disconnectedGraceSeconds;
+    }
+    _setTimer(secs == null ? null : Duration(seconds: secs), _onTimeout);
+  }
+
+  /// The timer ran out: auto check/fold, or deal the next hand.
+  void _onTimeout() {
+    if (_phase == _Phase.betting) {
+      _autoAct();
+    } else if (_phase == _Phase.handOver) {
+      _startHand();
     }
   }
 
@@ -391,6 +493,7 @@ class PokerGame extends Game {
   Screen privateState(String playerId) {
     final s = _seatOf(playerId);
     if (s == null) return Screen.waiting('Watching this game.');
+    if (s.left) return Screen.waiting('You left the game.');
 
     if (_phase == _Phase.over) {
       final standings = [..._seats]..sort((a, b) => b.chips.compareTo(a.chips));
@@ -400,23 +503,30 @@ class PokerGame extends Game {
       );
     }
 
+    if (_phase == _Phase.waiting) {
+      return Screen.waiting('The next hand starts when enough players are back.',
+          title: _waitingTitle, lines: ['Your chips: ${s.chips}']);
+    }
+
     if (_phase == _Phase.handOver) {
-      final canPlay = s.chips > 0;
+      final showReady = s.canPlay && !s.readyForNext;
       return Screen.results(
         title: 'Hand $_hand',
         cards: s.hole.isEmpty ? null : s.hole,
+        secret: s.hole.isNotEmpty, // your own cards: tap to reveal
         lines: [if (_board.isNotEmpty) 'Board: ${prettyCards(_board)}', ..._lastResult, 'Your chips: ${s.chips}'],
-        options: canPlay && !s.readyForNext ? const [Option('next', 'Next hand')] : const [],
-        actionId: canPlay && !s.readyForNext ? 'next-$_hand' : null,
+        options: showReady ? const [Option('next', 'Next hand')] : const [],
+        actionId: showReady ? 'next-$_hand' : null,
         secondsLeft: secondsUntil(_deadline),
       );
     }
 
-    if (s.hole.isEmpty) return Screen.waiting("You're out of chips. Watch the rest of the game.", title: 'Out');
+    if (s.hole.isEmpty) return Screen.waiting("You're out of this hand. Watch the rest of the game.", title: 'Out');
 
+    // Pot, board, to-call and chips are public anyway; only the hole cards are secret.
     final info = [..._tableLines(), 'Your chips: ${s.chips}'];
     if (s.folded) {
-      return Screen.waiting('You folded. Wait for the next hand.', cards: s.hole, lines: info);
+      return Screen.waiting('You folded. Wait for the next hand.', cards: s.hole, lines: info, secret: true);
     }
     if (_toAct >= 0 && _seats[_toAct] == s) {
       final o = _optionsFor(s);
@@ -427,10 +537,11 @@ class PokerGame extends Game {
         lines: [...info, if (o.toCall > 0) 'To call: ${o.toCall}'],
         options: o.options,
         secondsLeft: secondsUntil(_deadline),
+        secret: true,
       );
     }
     final who = _toAct >= 0 ? _seats[_toAct].name : 'the deal';
-    return Screen.waiting(s.allIn ? 'You are all in.' : 'Waiting for $who…', cards: s.hole, lines: info);
+    return Screen.waiting(s.allIn ? 'You are all in.' : 'Waiting for $who…', cards: s.hole, lines: info, secret: true);
   }
 
   @override
@@ -441,11 +552,15 @@ class PokerGame extends Game {
           'label': '${_seats[i].name}${i == _dealer ? ' (D)' : ''}',
           'value': _seatStatus(_seats[i]),
           'highlight': i == _toAct,
-          'dim': _seats[i].folded || (_seats[i].chips == 0 && _seats[i].hole.isEmpty),
+          'dim': _seats[i].folded || _seats[i].left || (_seats[i].chips == 0 && _seats[i].hole.isEmpty),
         }
     ];
     return {
-      'title': _phase == _Phase.over ? 'Game over' : 'Hand $_hand · ${_streetNames[_street]}',
+      'title': switch (_phase) {
+        _Phase.over => 'Game over',
+        _Phase.waiting => _waitingTitle,
+        _ => 'Hand $_hand · ${_streetNames[_street]}',
+      },
       'subtitle': 'Pot: $_pot   Blinds: $_smallBlind/$_bigBlind',
       if (_phase == _Phase.over) 'banner': _log.last,
       'secondsLeft': secondsUntil(_deadline),
@@ -460,7 +575,8 @@ class PokerGame extends Game {
     if (s.roundBet > 0) parts.add('bet ${s.roundBet}');
     if (s.folded) parts.add('folded');
     if (s.allIn && !s.folded) parts.add('ALL IN');
-    if (!s.connected) parts.add('offline');
+    if (s.left) parts.add('left');
+    if (!s.connected && !s.left) parts.add('offline');
     if (_shownHands.contains(s.id)) parts.add(prettyCards(s.hole));
     return parts.join(' · ');
   }

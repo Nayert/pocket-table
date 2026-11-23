@@ -4,7 +4,8 @@ import unittest
 
 from poker_eval import best_hand, evaluate5, describe
 from pots import build_pots, award
-from mafia import Mafia, assign_roles, MAFIA, DOCTOR, DETECTIVE, NOBODY
+from mafia import Mafia, assign_roles, MAFIA, DOCTOR, DETECTIVE, VILLAGER, NOBODY
+from poker import Poker
 
 
 def h(s):
@@ -145,6 +146,259 @@ class MafiaRules(unittest.TestCase):
         m = roles[MAFIA][0]
         with self.assertRaises(ValueError):
             g.act(m, m)  # mafia can't target themselves
+
+
+    def test_mafia_count_is_capped(self):
+        roles = list(assign_roles(["a", "b", "c", "d", "e"], mafia_count=4, rng=random.Random(1)).values())
+        self.assertEqual(roles.count(MAFIA), 2)  # mafia must start outnumbered
+
+    def test_minimum_game_four_players(self):
+        g = Mafia(["a", "b", "c", "d"], rng=random.Random(2))
+        roles = sorted(g.roles.values())
+        self.assertEqual(roles, sorted([MAFIA, DOCTOR, DETECTIVE, VILLAGER]))
+        m = next(p for p, r in g.roles.items() if r == MAFIA)
+        doc = next(p for p, r in g.roles.items() if r == DOCTOR)
+        det = next(p for p, r in g.roles.items() if r == DETECTIVE)
+        vil = next(p for p, r in g.roles.items() if r == VILLAGER)
+        for p in g.players:
+            g.act(p, "ready")
+        g.act(m, vil); g.act(doc, doc); g.act(det, m); g.act(vil, m)
+        self.assertEqual(g.phase, "dawn")
+        self.assertNotIn(vil, g.alive)
+        self.assertEqual(g.detective_results[det], f"{m} is Mafia")
+        for _ in range(2):
+            for p in sorted(g.alive):
+                g.act(p, "ready")
+        for p in sorted(g.alive):
+            g.act(p, m if p != m else doc)
+        self.assertEqual((g.phase, g.winner), ("over", "town"))
+
+    def test_vote_tie_means_nobody_out(self):
+        g = Mafia(["a", "b", "c", "d"], rng=random.Random(5), doctor=False, detective=False)
+        g.phase = "vote"
+        g.act("a", "b"); g.act("b", "a"); g.act("c", "a"); g.act("d", "b")
+        self.assertEqual(len(g.alive), 4)
+        self.assertIn("no one was voted out", g.log[-1])
+
+    def test_majority_rule(self):
+        g = Mafia([f"p{i}" for i in range(6)], rng=random.Random(5), majority_vote=True)
+        g.phase = "vote"
+        town = [p for p in g.players if g.roles[p] != MAFIA]
+        target = town[0]
+        v = [p for p in g.players if p != target]
+        votes = {v[0]: target, v[1]: target, target: v[0], v[2]: v[3], v[3]: v[4], v[4]: NOBODY}
+        for p in g.players:  # target has 2 of 6 votes: the most, but not a majority
+            g.act(p, votes[p])
+        self.assertEqual(len(g.alive), 6)
+        self.assertIn("majority", g.log[-1])
+
+    def test_phase_ends_without_disconnected_players(self):
+        g = Mafia(["a", "b", "c", "d"], rng=random.Random(1))
+        g.set_connected("d", False)
+        for p in "abc":
+            g.act(p, "ready")
+        self.assertEqual(g.phase, "night")  # didn't wait for d
+
+    def test_leaving_kills_and_can_end_the_game(self):
+        g = Mafia(["a", "b", "c", "d"], rng=random.Random(1), doctor=False, detective=False)
+        m = next(p for p, r in g.roles.items() if r == MAFIA)
+        g.remove_player(m)
+        self.assertEqual((g.phase, g.winner), ("over", "town"))
+
+
+def stacked_deck(holes, board):
+    """Deck that deals these hole cards (seat order) and this board."""
+    deal = [h[0] for h in holes] + [h[1] for h in holes]
+    deal += ["Xx", *board[:3], "Xx", board[3], "Xx", board[4]]
+    return list(reversed(deal))
+
+
+class PokerBetting(unittest.TestCase):
+    def total(self, g):
+        return sum(s.chips for s in g.seats) + g.pot
+
+    def test_heads_up_blinds_and_order(self):
+        g = Poker(["a", "b"], chips=1000, big_blind=20, dealer=0)
+        a, b = g.seats
+        self.assertEqual((a.round_bet, b.round_bet), (10, 20))  # dealer posts the small blind
+        self.assertEqual(g.seats[g.to_act].id, "a")             # and acts first pre-flop
+        g.act("a", "call")
+        self.assertEqual(g.seats[g.to_act].id, "b")             # big blind gets the option
+        self.assertTrue(g.legal("b")["can_raise"])
+        g.act("b", "check")
+        self.assertEqual(g.street, 1)
+        self.assertEqual(g.seats[g.to_act].id, "b")             # big blind acts first after the flop
+
+    def test_three_handed_blinds_rotate(self):
+        g = Poker(["a", "b", "c"], dealer=0)
+        self.assertEqual([s.round_bet for s in g.seats], [0, 10, 20])
+        self.assertEqual(g.seats[g.to_act].id, "a")
+        g.act("a", "fold"); g.act("b", "fold")
+        self.assertEqual(g.phase, "hand_over")
+        for p in "abc":
+            g.ready(p)
+        self.assertEqual(g.dealer, 1)
+        self.assertEqual([s.round_bet for s in g.seats], [20, 0, 10])
+
+    def test_min_raise(self):
+        g = Poker(["a", "b", "c"], dealer=0)
+        self.assertEqual(g.legal("a")["min_to"], 40)
+        with self.assertRaises(ValueError):
+            g.act("a", "raise", 30)
+        g.act("a", "raise", 60)               # raise by 40
+        self.assertEqual(g.legal("b")["min_to"], 100)  # next raise must be 40 more
+        with self.assertRaises(ValueError):
+            g.act("b", "raise", 99)
+        g.act("b", "raise", 100)
+
+    def test_illegal_moves(self):
+        g = Poker(["a", "b", "c"], dealer=0)
+        with self.assertRaises(ValueError):
+            g.act("b", "call")                # not b's turn
+        with self.assertRaises(ValueError):
+            g.act("a", "check")               # facing the big blind
+        with self.assertRaises(ValueError):
+            g.act("a", "raise", 40.5)         # not a whole number
+        with self.assertRaises(ValueError):
+            g.act("a", "raise", 5000)         # more than they have
+        with self.assertRaises(ValueError):
+            g.act("zz", "fold")               # not in the game
+
+    def test_short_all_in_does_not_reopen_betting(self):
+        g = Poker(["a", "b", "c"], chips=1000, dealer=0)
+        g.seats[2].chips = 150                # c (big blind) has 150 behind
+        g.act("a", "call"); g.act("b", "call"); g.act("c", "check")   # flop, b acts first
+        self.assertEqual(g.street, 1)
+        g.act("b", "raise", 100)              # b bets 100
+        g.act("c", "raise", 150)              # c all in for 150: only 50 more, not a full raise
+        g.act("a", "call")                    # a hadn't acted: a could have raised
+        self.assertEqual(g.seats[g.to_act].id, "b")
+        self.assertFalse(g.legal("b")["can_raise"])  # b already acted: call or fold only
+        with self.assertRaises(ValueError):
+            g.act("b", "raise", 400)
+        g.act("b", "call")
+        self.assertEqual(g.street, 2)
+
+    def test_full_raise_reopens_betting(self):
+        g = Poker(["a", "b", "c"], chips=1000, dealer=0)
+        g.act("a", "call"); g.act("b", "call"); g.act("c", "check")
+        g.act("b", "raise", 100)
+        g.act("c", "raise", 200)              # full raise
+        g.act("a", "fold")
+        self.assertTrue(g.legal("b")["can_raise"])
+
+    def test_everyone_all_in_runs_the_board_with_side_pots(self):
+        holes = [["As", "Ad"], ["Ks", "Kd"], ["Qs", "Qd"]]
+        board = ["2c", "7h", "9d", "3s", "4h"]
+        # c deals, a posts the small blind, b the big blind; stacks 100 / 300 / 600
+        g = Poker(["a", "b", "c"], chips=1000, dealer=2, deck=stacked_deck(holes, board))
+        for s, c in zip(g.seats, (100, 300, 600)):
+            s.chips = c - s.round_bet
+        start = 1000
+        g.act("c", "raise", 600)
+        g.act("a", "call")
+        g.act("b", "call")
+        self.assertEqual(g.phase, "hand_over")
+        self.assertEqual(len(g.board), 5)
+        a, b, c = g.seats
+        self.assertEqual(a.chips, 300)        # main pot 3 x 100
+        self.assertEqual(b.chips, 400)        # side pot 2 x 200
+        self.assertEqual(c.chips, 300)        # uncalled 300 comes back
+        self.assertEqual(a.chips + b.chips + c.chips, start)
+
+    def test_split_pot(self):
+        holes = [["2c", "3d"], ["2d", "3c"]]
+        board = ["As", "Ks", "Qd", "Jc", "Th"]  # board plays
+        g = Poker(["a", "b"], chips=500, dealer=0, deck=stacked_deck(holes, board))
+        g.act("a", "raise", 500)
+        g.act("b", "call")
+        self.assertEqual([s.chips for s in g.seats], [500, 500])
+        self.assertEqual(g.phase, "hand_over")
+
+    def test_odd_chip_goes_left_of_dealer(self):
+        holes = [["2c", "3d"], ["2d", "3c"], ["4c", "5c"]]
+        board = ["As", "Ks", "Qd", "Jc", "Th"]
+        g = Poker(["a", "b", "c"], chips=1000, big_blind=20, dealer=0, deck=stacked_deck(holes, board))
+        g.act("a", "call")
+        g.act("b", "fold")                    # b's small blind (10) stays in: pot 50
+        g.act("c", "check")
+        for _ in range(3):
+            g.act("c", "check"); g.act("a", "check")
+        # pot 50 split between c and a; odd chip to the first winner left of dealer (b folded -> c)
+        self.assertEqual(g.seats[2].chips, 1005)
+        self.assertEqual(g.seats[0].chips, 1005)
+        self.assertEqual(g.seats[1].chips, 990)
+
+    def test_bust_out_and_game_over(self):
+        holes = [["As", "Ad"], ["7c", "2d"]]
+        board = ["Ac", "Kd", "9h", "5s", "3c"]
+        g = Poker(["a", "b"], chips=500, dealer=0, deck=stacked_deck(holes, board))
+        g.act("a", "raise", 500)
+        g.act("b", "call")
+        self.assertEqual(g.phase, "over")
+        self.assertEqual(g.winner, "a")
+        self.assertEqual(g.seats[0].chips, 1000)
+        with self.assertRaises(ValueError):
+            g.act("a", "check")
+
+    def test_player_leaving_mid_hand(self):
+        g = Poker(["a", "b", "c"], dealer=0)
+        total = self.total(g)
+        g.remove_player("b")                  # b (small blind) leaves out of turn
+        self.assertTrue(g.seats[1].folded)
+        g.act("a", "fold")                    # only c left: wins uncontested
+        self.assertEqual(g.phase, "hand_over")
+        self.assertEqual(self.total(g), total)
+        g.ready("a"); g.ready("c")
+        self.assertEqual(g.phase, "betting")
+        self.assertEqual(g.seats[1].hole, [])  # never dealt in again
+
+    def test_leaving_on_your_turn_folds(self):
+        g = Poker(["a", "b"], dealer=0)
+        g.remove_player("a")
+        self.assertEqual(g.phase, "over")     # only b has chips and hasn't left
+        self.assertEqual(g.winner, "b")
+
+    def test_disconnected_players_sit_out(self):
+        g = Poker(["a", "b", "c"], dealer=0)
+        g.act("a", "fold"); g.act("b", "fold")
+        g.set_connected("b", False)
+        g.ready("a"); g.ready("c")
+        self.assertEqual(g.seats[1].hole, [])
+        self.assertEqual(sum(1 for s in g.seats if s.hole), 2)
+        g.act(g.seats[g.to_act].id, "fold")
+        g.set_connected("c", False)
+        g.ready("a")
+        self.assertEqual(g.phase, "waiting")  # only a is here
+        g.set_connected("b", True)
+        self.assertEqual(g.phase, "betting")
+
+    def test_timeout_checks_or_folds(self):
+        g = Poker(["a", "b", "c"], dealer=0)
+        g.timeout()                           # a faces the big blind: fold
+        self.assertTrue(g.seats[0].folded)
+        g.act("b", "call")
+        g.timeout()                           # c can check
+        self.assertFalse(g.seats[2].folded)
+        self.assertEqual(g.street, 1)
+
+    def test_random_games_conserve_chips(self):
+        for seed in range(40):
+            rng = random.Random(seed)
+            g = Poker(["a", "b", "c", "d"], chips=200, big_blind=20, rng=rng)
+            for _ in range(2000):
+                if g.phase == "over":
+                    break
+                if g.phase == "hand_over":
+                    g.timeout()
+                    continue
+                pid = g.seats[g.to_act].id
+                o = g.legal(pid)
+                moves = ["fold", "check" if o["can_check"] else "call"] + (["raise"] if o["can_raise"] else [])
+                m = rng.choice(moves)
+                g.act(pid, m, rng.randint(o["min_to"], o["max_to"]) if m == "raise" else None)
+                self.assertEqual(self.total(g), 800, f"seed {seed}")
+            self.assertTrue(all(s.chips >= 0 for s in g.seats))
 
 
 if __name__ == "__main__":

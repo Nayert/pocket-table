@@ -6,10 +6,11 @@ import 'package:platform_core/platform_core.dart';
 import 'package:test/test.dart';
 
 class _Ctx implements GameContext {
+  int updates = 0;
   @override
   final Random random = Random(7);
   @override
-  void requestUpdate() {}
+  void requestUpdate() => updates++;
 }
 
 void main() {
@@ -35,8 +36,8 @@ void main() {
   String title() => game.publicState()['title'] as String;
 
   test('roles are private and there is one mafia among 6', () {
-    final titles = players.map((p) => game.privateState(p.id).title!).toList();
-    expect(titles.where((t) => t.contains('Mafia')).length, 1);
+    final bodies = players.map((p) => game.privateState(p.id).body!).toList();
+    expect(bodies.where((b) => b.contains('You are in the Mafia')).length, 1);
     expect(game.publicState().toString(), isNot(contains('Mafia')));
   });
 
@@ -65,9 +66,183 @@ void main() {
     everyoneActs(); // night: at most one villager dies, so the town still outnumbers the mafia
     everyoneActs(); // dawn
     everyoneActs(); // day
-    final mafiaId = players.firstWhere((p) => game.privateState(p.id).lines!.first.contains('Mafia')).id;
+    final mafiaId = game.rolesForTesting.entries.firstWhere((e) => e.value == 'mafia').key;
     everyoneActs((p, s) => s.options.any((o) => o.id == mafiaId) ? mafiaId : 'nobody');
     expect(game.isOver, isTrue);
     expect(game.publicState()['banner'], 'Town wins!');
+  });
+
+  // ---- same scenarios as prototype/test_prototypes.py (MafiaRules) ----
+
+  MafiaGame fresh(int n, Map<String, Object> settings) {
+    players = [for (var i = 0; i < n; i++) Player(id: 'p$i', name: 'P$i', reconnectToken: 't$i')];
+    game.dispose();
+    return game = MafiaGame()..start(_Ctx(), players, settings);
+  }
+
+  void act(String pid, String choice) {
+    final s = game.privateState(pid);
+    final r = game.handleAction(pid, PlayerAction(actionId: s.actionId ?? 'none', choice: [choice]));
+    if (!r.ok) throw StateError(r.error!);
+  }
+
+  String roleOf(String pid) => game.rolesForTesting[pid]!;
+  String withRole(String role) => game.rolesForTesting.entries.firstWhere((e) => e.value == role).key;
+
+  test('mafia count is capped so mafia start outnumbered', () {
+    fresh(5, {'mafiaCount': 4});
+    expect(game.rolesForTesting.values.where((r) => r == 'mafia').length, 2);
+  });
+
+  test('minimum game: four players', () {
+    fresh(4, {'doctor': true, 'detective': true});
+    expect(game.rolesForTesting.values.toList()..sort(), ['detective', 'doctor', 'mafia', 'villager']);
+    final m = withRole('mafia'), doc = withRole('doctor'), det = withRole('detective'), vil = withRole('villager');
+    for (final p in players) {
+      act(p.id, 'ready');
+    }
+    act(m, vil);
+    act(doc, doc);
+    act(det, m);
+    act(vil, m);
+    expect(title(), startsWith('Morning'));
+    expect(game.privateState(det).body, 'Your investigation: ${players.firstWhere((p) => p.id == m).name} is Mafia.');
+    expect(game.privateState(vil).title, 'Dead');
+    final living = [for (final p in players) if (p.id != vil) p.id]..sort();
+    for (var i = 0; i < 2; i++) {
+      for (final p in living) {
+        act(p, 'ready');
+      }
+    }
+    for (final p in living) {
+      act(p, p != m ? m : doc);
+    }
+    expect(game.isOver, isTrue);
+    expect(game.publicState()['banner'], 'Town wins!');
+  });
+
+  test('a vote tie means nobody is out', () {
+    fresh(4, {'doctor': false, 'detective': false});
+    game.forcePhaseForTesting('vote');
+    act('p0', 'p1');
+    act('p1', 'p0');
+    act('p2', 'p0');
+    act('p3', 'p1');
+    final rows = (game.publicState()['rows'] as List).cast<Map>();
+    expect(rows.where((r) => r['value'] == 'alive').length, 4);
+    expect((game.publicState()['log'] as List).last, contains('no one was voted out'));
+  });
+
+  test('majority rule: most votes is not enough', () {
+    fresh(6, {'majorityVote': true});
+    game.forcePhaseForTesting('vote');
+    final target = [for (final p in players) if (roleOf(p.id) != 'mafia') p.id].first;
+    final v = [for (final p in players) if (p.id != target) p.id];
+    final votes = {v[0]: target, v[1]: target, target: v[0], v[2]: v[3], v[3]: v[4], v[4]: 'nobody'};
+    for (final p in players) {
+      act(p.id, votes[p.id]!); // target has 2 of 6 votes: the most, but not a majority
+    }
+    final rows = (game.publicState()['rows'] as List).cast<Map>();
+    expect(rows.where((r) => r['value'] == 'alive').length, 6);
+    expect((game.publicState()['log'] as List).last, contains('majority'));
+  });
+
+  test('a phase ends without waiting for disconnected players', () {
+    fresh(4, {});
+    game.onPlayerConnectionChanged('p3', false);
+    for (final p in ['p0', 'p1', 'p2']) {
+      act(p, 'ready');
+    }
+    expect(title(), startsWith('Night')); // did not wait for p3
+  });
+
+  test('disconnecting the last holdout ends the phase', () {
+    final ctx = _Ctx();
+    players = [for (var i = 0; i < 4; i++) Player(id: 'p$i', name: 'P$i', reconnectToken: 't$i')];
+    game.dispose();
+    game = MafiaGame()..start(ctx, players, {});
+    for (final p in ['p0', 'p1', 'p2']) {
+      act(p, 'ready');
+    }
+    expect(title(), 'Check your role');
+    game.onPlayerConnectionChanged('p3', false);
+    expect(title(), startsWith('Night'));
+    expect(ctx.updates, 1);
+  });
+
+  test('leaving kills the player and can end the game', () {
+    fresh(4, {'doctor': false, 'detective': false});
+    game.onPlayerRemoved(withRole('mafia'));
+    expect(game.isOver, isTrue);
+    expect(game.publicState()['banner'], 'Town wins!');
+    expect((game.publicState()['log'] as List).last, contains('left the game. They were Mafia.'));
+  });
+
+  test('leaving mid-phase can end the phase', () {
+    fresh(6, {});
+    final leaver = players.firstWhere((p) => roleOf(p.id) != 'mafia').id;
+    for (final p in players) {
+      if (p.id != leaver) act(p.id, 'ready');
+    }
+    expect(title(), 'Check your role');
+    game.onPlayerRemoved(leaver);
+    expect(title(), startsWith('Night'));
+  });
+
+  group('privacy: nothing private in title or lines', () {
+    const roleWords = ['Mafia', 'Doctor', 'Detective', 'Villager'];
+
+    void checkPhase(String label) {
+      final screens = [
+        for (final p in players) game.privateState(p.id),
+      ];
+      expect(screens.map((s) => s.title).toSet().length, 1, reason: '$label: titles differ');
+      for (final s in screens) {
+        expect(s.secret, isTrue, reason: label);
+        final visible = '${s.title} ${(s.lines ?? []).join(' ')}';
+        for (final w in roleWords) {
+          expect(visible, isNot(contains(w)), reason: '$label: $visible');
+        }
+      }
+    }
+
+    test('reveal, night, dawn, day and vote screens', () {
+      checkPhase('reveal');
+      everyoneActs();
+      checkPhase('night');
+      everyoneActs();
+      // dawn: dead players get another screen; only check the living
+      for (final s in [for (final p in players) game.privateState(p.id)].where((s) => s.title != 'Dead')) {
+        expect(s.title, 'Morning');
+        expect(s.secret, isTrue);
+        expect((s.lines ?? []).join(' '), isNot(anyOf(contains('Mafia'), contains('Doctor'), contains('Detective'))));
+      }
+      everyoneActs();
+      for (final s in [for (final p in players) game.privateState(p.id)].where((s) => s.title != 'Dead')) {
+        expect(s.title, startsWith('Day'));
+        expect(s.secret, isTrue);
+        expect('${s.title} ${(s.lines ?? []).join(' ')}', isNot(contains('Your role')));
+      }
+      everyoneActs();
+      for (final s in [for (final p in players) game.privateState(p.id)].where((s) => s.title != 'Dead')) {
+        expect(s.title, 'Vote someone out');
+        expect(s.secret, isTrue);
+        expect(s.lines, isNull);
+      }
+    });
+
+    test('the reveal body holds the role, and teammates only for the Mafia', () {
+      for (final p in players) {
+        final s = game.privateState(p.id);
+        expect(s.body, contains(roleOf(p.id) == 'mafia' ? 'You are in the Mafia.' : 'You are the'));
+      }
+    });
+
+    test('public state has no roles until the game ends', () {
+      final text = game.publicState().toString();
+      for (final w in ['Doctor', 'Detective', 'Villager', 'Mafia', 'mafia', 'doctor']) {
+        expect(text, isNot(contains(w)), reason: w);
+      }
+    });
   });
 }

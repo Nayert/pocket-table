@@ -62,7 +62,7 @@ That's it. Games never use the transport, the UI or the network directly.
   test/poker_test.dart              # evaluator, pots, and game flow
   test/mafia_test.dart
   prototype/                        # Python versions of the rules, with tests
-    poker_eval.py  pots.py  mafia.py  test_prototypes.py
+    poker_eval.py  pots.py  poker.py  mafia.py  test_prototypes.py
 ```
 
 ## Running the tests

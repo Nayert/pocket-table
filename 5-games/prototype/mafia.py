@@ -1,8 +1,14 @@
 """Mafia rules (prototype for mafia_game.dart). No UI, no timers, no network.
 
 Phases loop: reveal -> night -> dawn -> day -> vote -> verdict -> night ...
-Any phase ends early once every living player has acted; otherwise the
-host's timer calls timeout(), which fills in defaults (no action / abstain).
+Any phase ends early once every living, connected player has acted;
+otherwise the host's timer calls timeout(), which fills in defaults
+(no action / abstain). A disconnected player can still act if they come
+back before the phase ends.
+
+Voting: the player with the most votes is out, unless there is a tie for
+the most votes or "nobody" has the most. With majority_vote=True the leader
+also needs more than half of the living players' votes.
 """
 import random
 
@@ -12,7 +18,8 @@ NOBODY = "nobody"
 
 def assign_roles(players, mafia_count=0, doctor=True, detective=True, rng=random):
     n = len(players)
-    k = mafia_count or max(1, n // 4)
+    # Mafia must start outnumbered, or the game would be over before it began.
+    k = min(mafia_count or max(1, n // 4), max(1, (n - 1) // 2))
     specials = ([DOCTOR] if doctor else []) + ([DETECTIVE] if detective else [])
     while specials and k + len(specials) > n - 1:
         specials.pop()  # drop detective first, then doctor
@@ -23,12 +30,14 @@ def assign_roles(players, mafia_count=0, doctor=True, detective=True, rng=random
 
 
 class Mafia:
-    def __init__(self, players, rng=None, reveal_roles=True, **role_opts):
+    def __init__(self, players, rng=None, reveal_roles=True, majority_vote=False, **role_opts):
         self.rng = rng or random.Random()
         self.players = list(players)
         self.roles = assign_roles(self.players, rng=self.rng, **role_opts)
         self.alive = set(self.players)
         self.reveal_roles = reveal_roles
+        self.majority_vote = majority_vote
+        self.connected = set(self.players)
         self.round = 1
         self.phase = "reveal"
         self.acted: dict[str, str] = {}
@@ -58,8 +67,33 @@ class Mafia:
         if choice not in self.options(pid):
             raise ValueError(f"{pid} can't choose {choice} in {self.phase}")
         self.acted[pid] = choice
-        if all(p in self.acted for p in self.alive):
+        self._maybe_end_early()
+
+    def _maybe_end_early(self):
+        waiting_on = [p for p in self.alive if p in self.connected]
+        if self.phase != "over" and waiting_on and all(p in self.acted for p in waiting_on):
             self._end_phase()
+
+    def set_connected(self, pid, connected):
+        if connected:
+            self.connected.add(pid)
+        else:
+            self.connected.discard(pid)
+            self._maybe_end_early()
+
+    def remove_player(self, pid):
+        """The player left for good (kicked or pressed Leave): they're out of the game."""
+        self.connected.discard(pid)
+        self.acted.pop(pid, None)
+        if pid not in self.alive or self.phase == "over":
+            return
+        self.alive.discard(pid)
+        extra = f" They were {self.roles[pid]}." if self.reveal_roles else ""
+        self.log.append(f"{pid} left the game.{extra}")
+        if self._check_win():
+            self.phase = "over"
+        else:
+            self._maybe_end_early()
 
     def timeout(self):
         if self.phase != "over":
@@ -119,6 +153,9 @@ class Mafia:
         leaders = [c for c, n in tally.items() if n == top]
         if len(leaders) > 1 or leaders[0] == NOBODY:
             self.log.append(f"Day {self.round}: no one was voted out.")
+            return
+        if self.majority_vote and top * 2 <= len(self.alive):
+            self.log.append(f"Day {self.round}: no one got a majority, so no one was voted out.")
             return
         out = leaders[0]
         self.alive.discard(out)

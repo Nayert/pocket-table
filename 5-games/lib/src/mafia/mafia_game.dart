@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:platform_core/platform_core.dart';
 
@@ -46,6 +47,7 @@ class MafiaGame extends Game {
         GameSetting.toggle('doctor', 'Doctor', defaultValue: true),
         GameSetting.toggle('detective', 'Detective', defaultValue: true),
         GameSetting.toggle('revealRoles', 'Reveal roles when voted out', defaultValue: true),
+        GameSetting.toggle('majorityVote', 'Need a majority of the living to vote someone out', defaultValue: false),
         GameSetting.integer('nightSeconds', 'Night (seconds)', defaultValue: 60, min: 20, max: 300, step: 10),
         GameSetting.integer('daySeconds', 'Discussion (seconds)', defaultValue: 180, min: 30, max: 900, step: 30),
         GameSetting.integer('voteSeconds', 'Voting (seconds)', defaultValue: 60, min: 15, max: 300, step: 15),
@@ -55,6 +57,7 @@ class MafiaGame extends Game {
   final List<Player> _players = [];
   final Map<String, Role> _roles = {};
   final Set<String> _alive = {};
+  final Set<String> _connected = {};
   final Map<String, String> _acted = {};
   final List<String> _log = [];
   final Map<String, String> _detectiveResults = {};
@@ -62,6 +65,9 @@ class MafiaGame extends Game {
   int _round = 1;
   String? _winner;
   bool _revealRoles = true;
+  bool _majorityVote = false;
+  String _nightResult = '';
+  String _voteResult = '';
   late Map<_Phase, int> _durations;
 
   Timer? _timer;
@@ -76,6 +82,7 @@ class MafiaGame extends Game {
       ..clear()
       ..addAll(players);
     _revealRoles = settings['revealRoles'] as bool? ?? true;
+    _majorityVote = settings['majorityVote'] as bool? ?? false;
     _durations = {
       _Phase.reveal: 30,
       _Phase.night: settings['nightSeconds'] as int? ?? 60,
@@ -90,12 +97,15 @@ class MafiaGame extends Game {
       detective: settings['detective'] as bool? ?? true,
     );
     _alive.addAll(_players.map((p) => p.id));
+    _connected.addAll(_players.map((p) => p.id));
     _enter(_Phase.reveal);
   }
 
   void _assignRoles({required int mafiaCount, required bool doctor, required bool detective}) {
     final n = _players.length;
-    final k = mafiaCount > 0 ? mafiaCount.clamp(1, n - 1).toInt() : (n ~/ 4 < 1 ? 1 : n ~/ 4);
+    // Mafia must start outnumbered, or the game would be over before it began.
+    final wanted = mafiaCount > 0 ? mafiaCount : max(1, n ~/ 4);
+    final k = min(wanted, max(1, (n - 1) ~/ 2));
     final specials = [if (doctor) Role.doctor, if (detective) Role.detective];
     while (specials.isNotEmpty && k + specials.length > n - 1) {
       specials.removeLast(); // drop detective first, then doctor
@@ -155,9 +165,57 @@ class MafiaGame extends Game {
       return const ActionResult.error("You can't choose that.");
     }
     _acted[playerId] = choice;
-    if (_alive.every(_acted.containsKey)) _endPhase();
+    _maybeEndEarly();
     return const ActionResult.ok();
   }
+
+  /// End the phase once every living, connected player has acted.
+  /// Returns whether the phase ended.
+  bool _maybeEndEarly() {
+    final waitingOn = [for (final id in _alive) if (_connected.contains(id)) id];
+    if (_phase != _Phase.over && waitingOn.isNotEmpty && waitingOn.every(_acted.containsKey)) {
+      _endPhase();
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  void onPlayerConnectionChanged(String playerId, bool connected) {
+    if (connected) {
+      _connected.add(playerId);
+    } else {
+      _connected.remove(playerId);
+      if (_maybeEndEarly()) _ctx.requestUpdate();
+    }
+  }
+
+  /// The player left for good (kicked or pressed Leave): they're out of the game.
+  @override
+  void onPlayerRemoved(String playerId) {
+    _connected.remove(playerId);
+    _acted.remove(playerId);
+    if (_alive.contains(playerId) && _phase != _Phase.over) {
+      _alive.remove(playerId);
+      final extra = _revealRoles ? ' They were ${_roleNames[_roles[playerId]]}.' : '';
+      _log.add('${_name(playerId)} left the game.$extra');
+      if (_checkWin()) {
+        _enter(_Phase.over);
+      } else {
+        _maybeEndEarly();
+      }
+    }
+    _ctx.requestUpdate();
+  }
+
+  /// Test-only: jump straight to a phase (e.g. 'vote') with nobody having acted.
+  void forcePhaseForTesting(String phase) {
+    _acted.clear();
+    _enter(_Phase.values.byName(phase));
+  }
+
+  /// Test-only: who has which role.
+  Map<String, String> get rolesForTesting => {for (final e in _roles.entries) e.key: e.value.name};
 
   void _enter(_Phase phase) {
     _phase = phase;
@@ -221,15 +279,16 @@ class MafiaGame extends Game {
     }
     if (target != null && !saved.contains(target)) {
       _alive.remove(target);
-      _log.add('Night $_round: ${_name(target)} was killed.');
+      _nightResult = 'Night $_round: ${_name(target)} was killed.';
     } else {
-      _log.add('Night $_round: nobody died.');
+      _nightResult = 'Night $_round: nobody died.';
     }
+    _log.add(_nightResult);
   }
 
   void _resolveVote(Map<String, String> acted) {
     if (acted.isEmpty) {
-      _log.add('Day $_round: nobody voted.');
+      _log.add(_voteResult = 'Day $_round: nobody voted.');
       return;
     }
     final tally = <String, int>{};
@@ -239,13 +298,17 @@ class MafiaGame extends Game {
     final top = tally.values.reduce((a, b) => a > b ? a : b);
     final leaders = [for (final e in tally.entries) if (e.value == top) e.key];
     if (leaders.length > 1 || leaders.single == _nobody) {
-      _log.add('Day $_round: no one was voted out.');
+      _log.add(_voteResult = 'Day $_round: no one was voted out.');
+      return;
+    }
+    if (_majorityVote && top * 2 <= _alive.length) {
+      _log.add(_voteResult = 'Day $_round: no one got a majority, so no one was voted out.');
       return;
     }
     final out = leaders.single;
     _alive.remove(out);
     final extra = _revealRoles ? ' They were ${_roleNames[_roles[out]]}.' : '';
-    _log.add('Day $_round: ${_name(out)} was voted out.$extra');
+    _log.add(_voteResult = 'Day $_round: ${_name(out)} was voted out.$extra');
   }
 
   bool _checkWin() {
@@ -269,7 +332,7 @@ class MafiaGame extends Game {
     final role = _roles[pid];
     if (role == null) return Screen.waiting('Watching this game.');
     final secs = secondsUntil(_deadline);
-    final roleLine = 'You are: ${_roleNames[role]}';
+    final roleLine = 'Your role: ${_roleNames[role]}';
 
     if (_phase == _Phase.over) {
       return Screen.results(
@@ -288,79 +351,87 @@ class MafiaGame extends Game {
 
     final options = _optionIds(pid);
     if (options.isEmpty) {
-      return Screen.waiting('Waiting for everyone else…', lines: [roleLine], secondsLeft: secs);
+      return Screen.waiting(roleLine, title: 'Waiting for everyone else…', secondsLeft: secs, secret: true);
     }
 
     switch (_phase) {
       case _Phase.reveal:
         final team = role == Role.mafia ? [for (final id in _mafiaIds) if (id != pid) _name(id)] : <String>[];
         return Screen.private(
-          title: 'You are ${role == Role.mafia ? 'in the Mafia' : 'the ${_roleNames[role]}'}',
-          body: _roleBlurbs[role],
-          lines: team.isEmpty ? null : ['Your fellow Mafia: ${team.join(', ')}'],
+          title: 'Your secret role',
+          body: [
+            role == Role.mafia ? 'You are in the Mafia.' : 'You are the ${_roleNames[role]}.',
+            _roleBlurbs[role]!,
+            if (team.isNotEmpty) 'Your fellow Mafia: ${team.join(', ')}',
+          ].join('\n'),
           options: const [Option(_ready, 'Got it')],
           actionId: _actionId,
           secondsLeft: secs,
+          secret: true,
         );
 
       case _Phase.night:
-        final (title, body) = switch (role) {
-          Role.mafia => ('Who should the Mafia kill?', 'Agree with your team. If you disagree, the most votes wins.'),
-          Role.doctor => ('Who will you protect?', null),
-          Role.detective => ('Who will you investigate?', null),
-          Role.villager => ('Who do you suspect?', 'Everyone taps something at night so no one can tell who has a power.'),
+        final prompt = switch (role) {
+          Role.mafia => 'Who should the Mafia kill? Agree with your team. If you disagree, the most votes wins.',
+          Role.doctor => 'Who will you protect?',
+          Role.detective => 'Who will you investigate?',
+          Role.villager => 'Who do you suspect? Everyone taps something at night so no one can tell who has a power.',
         };
-        final lines = <String>[roleLine];
+        final body = [prompt];
         if (role == Role.mafia) {
           for (final id in _mafiaIds) {
             if (id != pid && _alive.contains(id)) {
               final pick = _acted[id];
-              lines.add('${_name(id)}: ${pick == null ? 'deciding…' : _name(pick)}');
+              body.add('${_name(id)}: ${pick == null ? 'deciding…' : _name(pick)}');
             }
           }
         }
         return Screen.choice(
           actionId: _actionId,
-          title: 'Night $_round: $title',
-          body: body,
-          lines: lines,
+          title: 'Night $_round',
+          body: body.join('\n'),
           options: _playerOptions(options),
           secondsLeft: secs,
+          secret: true,
         );
 
       case _Phase.dawn:
+        final result = _detectiveResults[pid];
         return Screen.private(
           title: 'Morning',
-          body: _log.last,
-          lines: [if (_detectiveResults[pid] != null) 'Your investigation: ${_detectiveResults[pid]}'],
+          lines: [_nightResult],
+          body: result == null ? 'Nothing to report.' : 'Your investigation: $result',
           options: const [Option(_ready, 'Continue')],
           actionId: _actionId,
           secondsLeft: secs,
+          secret: true,
         );
 
       case _Phase.day:
         return Screen.private(
           title: 'Day $_round: discuss',
-          body: 'Talk it over out loud. Who is lying?',
-          lines: [roleLine, 'Alive: ${_alivePlayers.map((p) => p.name).join(', ')}'],
+          body: roleLine,
+          lines: ['Talk it over out loud. Who is lying?', 'Alive: ${_alivePlayers.map((p) => p.name).join(', ')}'],
           options: const [Option(_ready, 'Ready to vote')],
           actionId: _actionId,
           secondsLeft: secs,
+          secret: true,
         );
 
       case _Phase.vote:
         return Screen.choice(
           actionId: _actionId,
           title: 'Vote someone out',
-          lines: [roleLine],
+          body: roleLine,
           options: _playerOptions(options),
           secondsLeft: secs,
+          secret: true,
         );
 
       case _Phase.verdict:
         return Screen.private(
           title: 'The vote is in',
-          body: _log.last,
+          body: _voteResult,
           options: const [Option(_ready, 'Continue')],
           actionId: _actionId,
           secondsLeft: secs,
