@@ -30,6 +30,7 @@ abstract class Game {
   Screen privateState(String playerId); // what this one player should see now
   bool get isOver;
   void onPlayerConnectionChanged(String playerId, bool connected) {}
+  void onPlayerRemoved(String playerId) {}   // kicked, or pressed Leave mid-game
   void dispose() {}
 }
 ```
@@ -59,7 +60,10 @@ abstract class Game {
 
 ## Key notes
 
-- **Never trust the client.** Reject actions from unknown players, out-of-turn actions, and option ids that weren't on that player's screen.
+- **Never trust the client.** Reject actions from unknown players, out-of-turn actions, and option ids that weren't on that player's screen. Numbers must be whole, in range, and on the option's `step` (the maximum, e.g. all in, is always allowed).
+- **Leaving:** a dropped connection keeps the seat (`onPlayerConnectionChanged(false)`), so a refresh or lock screen can come back. Pressing **Leave** or being **kicked** mid-game removes the seat for good and calls `onPlayerRemoved`.
+- **Names:** control characters and invisible formatting characters (zero-width, direction overrides) are stripped, then 1–16 characters, unique ignoring case.
+- **Secrets:** games can mark a `Screen` with `secret: true`; the page hides its `body` and `cards` behind tap-to-reveal. `title` and `lines` stay visible, so they must never carry private information.
 - **Adding a game means writing a new class, not changing the core.** Keep a registry (`List<Game Function()>`) the picker reads from.
 - After every accepted action: send each player their `privateState`, update the host view with `publicState`.
 - On reconnect, immediately resend that player's current screen.

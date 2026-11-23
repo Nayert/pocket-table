@@ -6,6 +6,8 @@ import 'package:transport/transport.dart';
 /// Tiny game: each player presses A or B once; game ends when all have.
 class _PressGame extends Game {
   final pressed = <String, String>{};
+  final removed = <String>[];
+  final values = <Object?>[];
   late List<Player> players;
 
   @override
@@ -25,13 +27,21 @@ class _PressGame extends Game {
   @override
   ActionResult handleAction(String playerId, PlayerAction action) {
     pressed[playerId] = action.first!;
+    values.add(action.value);
     return const ActionResult.ok();
   }
 
   @override
+  void onPlayerRemoved(String playerId) => removed.add(playerId);
+
+  @override
   Screen privateState(String playerId) => pressed.containsKey(playerId)
       ? Screen.waiting('Done')
-      : Screen.choice(actionId: 'press', options: const [Option('a', 'A'), Option('b', 'B')]);
+      : Screen.choice(actionId: 'press', secret: true, body: 'shh', options: const [
+          Option('a', 'A'),
+          Option('b', 'B'),
+          Option('r', 'Raise', input: OptionInput(min: 10, max: 52, step: 5)),
+        ]);
 
   @override
   Map<String, dynamic> publicState() => {'title': 'Press', 'rows': []};
@@ -112,5 +122,58 @@ void main() {
     platform.startGame();
     join('c3', 'Cal');
     expect(t.lastTo('c3', type: 'join.error')!['payload']['reason'], 'game_in_progress');
+  });
+
+  test('amounts must be whole numbers on the step (or the maximum)', () {
+    join('c1', 'Ana');
+    join('c2', 'Ben');
+    platform.startGame();
+    final game = platform.activeGame as _PressGame;
+    for (final bad in [12, 15.5, 9, 55, '20', null]) {
+      t.simulateMessage('c1', 'action', {'actionId': 'press', 'choice': ['r'], 'value': bad});
+    }
+    expect(game.pressed, isEmpty);
+    t.simulateMessage('c1', 'action', {'actionId': 'press', 'choice': ['r'], 'value': 52}); // all in: max
+    t.simulateMessage('c2', 'action', {'actionId': 'press', 'choice': ['r'], 'value': 20.0});
+    expect(game.pressed.length, 2);
+  });
+
+  test('screens marked secret say so on the wire', () {
+    join('c1', 'Ana');
+    join('c2', 'Ben');
+    platform.startGame();
+    expect(t.lastTo('c1')!['payload']['secret'], isTrue);
+  });
+
+  test('invisible characters are stripped from names', () {
+    join('c1', 'Bob');
+    join('c2', 'Bo\u200Bb\u202E');
+    expect(t.lastTo('c2', type: 'join.error')!['payload']['reason'], 'name_taken');
+  });
+
+  test('pressing Leave mid-game removes the player from the game', () {
+    join('c1', 'Ana');
+    join('c2', 'Ben');
+    join('c3', 'Cal');
+    platform.startGame();
+    final game = platform.activeGame as _PressGame;
+    final ben = platform.players[1].id;
+    t.simulateMessage('c2', 'leave');
+    expect(game.removed, [ben]);
+    expect(platform.players.map((p) => p.name), ['Ana', 'Cal']);
+    t.simulateMessage('c2', 'action', {'actionId': 'press', 'choice': ['a']});
+    expect(game.pressed, isEmpty);
+  });
+
+  test('kicking mid-game removes the player from the game', () {
+    join('c1', 'Ana');
+    join('c2', 'Ben');
+    join('c3', 'Cal');
+    platform.startGame();
+    final game = platform.activeGame as _PressGame;
+    final cal = platform.players[2].id;
+    platform.kick(cal);
+    expect(game.removed, [cal]);
+    expect(t.lastTo('c3', type: 'room.closed')!['payload']['reason'], 'kicked');
   });
 }

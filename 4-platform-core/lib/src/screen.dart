@@ -63,11 +63,14 @@ class Screen {
     this.textInput = false,
     this.secondsLeft,
     this.submitLabel,
+    this.secret = false,
   });
 
   /// Nothing to do: show a message and a spinner.
-  factory Screen.waiting(String message, {String? title, List<String>? cards, List<String>? lines, int? secondsLeft}) =>
-      Screen._(ScreenKind.waiting, title: title, body: message, cards: cards, lines: lines, secondsLeft: secondsLeft);
+  factory Screen.waiting(String message,
+          {String? title, List<String>? cards, List<String>? lines, int? secondsLeft, bool secret = false}) =>
+      Screen._(ScreenKind.waiting,
+          title: title, body: message, cards: cards, lines: lines, secondsLeft: secondsLeft, secret: secret);
 
   /// Private information (a role, your cards). Can include buttons, e.g. "Ready".
   factory Screen.private({
@@ -78,9 +81,17 @@ class Screen {
     List<Option> options = const [],
     String? actionId,
     int? secondsLeft,
+    bool secret = false,
   }) =>
       Screen._(ScreenKind.private,
-          title: title, body: body, cards: cards, lines: lines, options: options, actionId: actionId, secondsLeft: secondsLeft);
+          title: title,
+          body: body,
+          cards: cards,
+          lines: lines,
+          options: options,
+          actionId: actionId,
+          secondsLeft: secondsLeft,
+          secret: secret);
 
   /// Pick between [min] and [max] of [options].
   factory Screen.choice({
@@ -94,8 +105,10 @@ class Screen {
     int max = 1,
     int? secondsLeft,
     String? submitLabel,
+    bool secret = false,
   }) =>
       Screen._(ScreenKind.choice,
+          secret: secret,
           actionId: actionId,
           options: options,
           title: title,
@@ -137,9 +150,17 @@ class Screen {
     List<Option> options = const [],
     String? actionId,
     int? secondsLeft,
+    bool secret = false,
   }) =>
       Screen._(ScreenKind.results,
-          title: title, body: body, lines: lines, cards: cards, options: options, actionId: actionId, secondsLeft: secondsLeft);
+          title: title,
+          body: body,
+          lines: lines,
+          cards: cards,
+          options: options,
+          actionId: actionId,
+          secondsLeft: secondsLeft,
+          secret: secret);
 
   final ScreenKind kind;
   final String? title;
@@ -155,6 +176,10 @@ class Screen {
   final bool textInput;
   final int? secondsLeft;
   final String? submitLabel;
+
+  /// Ask the page to hide [body] and [cards] behind "Tap to reveal".
+  /// [title] and [lines] stay visible, so never put private info there.
+  final bool secret;
 
   /// Whether the player can send an action from this screen.
   bool get acceptsAction => actionId != null && (options.isNotEmpty || kind == ScreenKind.input);
@@ -173,6 +198,7 @@ class Screen {
           if (inputMax != null) 'max': inputMax,
         },
         if (submitLabel != null) 'submitLabel': submitLabel,
+        if (secret) 'secret': true,
         if (includeTimer && secondsLeft != null) 'secondsLeft': secondsLeft,
       };
 

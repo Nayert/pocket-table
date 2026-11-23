@@ -91,6 +91,10 @@ abstract class Game {
 
   void onPlayerConnectionChanged(String playerId, bool connected) {}
 
+  /// The player left for good (kicked, or pressed Leave mid-game). They will
+  /// never act again: fold them, kill them off, or whatever the rules say.
+  void onPlayerRemoved(String playerId) {}
+
   /// Cancel timers etc. Called when the game ends or the host quits.
   void dispose() {}
 }

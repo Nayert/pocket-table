@@ -170,9 +170,8 @@ class Platform implements GameContext {
       _connToPlayer.remove(p.connId);
       _transport?.disconnect(p.connId!);
     }
+    _removeFromGame(p);
     players.remove(p);
-    _gamePlayerIds.remove(p.id);
-    activeGame?.onPlayerConnectionChanged(p.id, false);
     _broadcastLobby();
     _pushScreens();
     _notify();
@@ -262,7 +261,11 @@ class Platform implements GameContext {
 
   static String? _cleanName(Object? raw) {
     if (raw is! String) return null;
-    final name = raw.replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '').trim();
+    // Control characters and invisible formatting characters (zero-width,
+    // direction overrides) would let one player look like another.
+    final name = raw
+        .replaceAll(RegExp(r'[\x00-\x1F\x7F\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]'), '')
+        .trim();
     if (name.isEmpty || name.length > 16) return null;
     return name;
   }
@@ -306,7 +309,7 @@ class Platform implements GameContext {
         if (value is! String || value.trim().isEmpty || value.length > (screen.inputMax ?? 60)) {
           return 'Check your answer.';
         }
-      } else if (!_inRange(value, screen.inputMin, screen.inputMax)) {
+      } else if (!_inRange(value, screen.inputMin, screen.inputMax, 1)) {
         return 'Pick a number from ${screen.inputMin} to ${screen.inputMax}.';
       }
       return null;
@@ -321,17 +324,20 @@ class Platform implements GameContext {
     for (final c in choice) {
       final opt = ids[c];
       if (opt == null) return 'That option isn\'t available.';
-      if (opt.input != null && !_inRange(value, opt.input!.min, opt.input!.max)) {
+      if (opt.input != null && !_inRange(value, opt.input!.min, opt.input!.max, opt.input!.step)) {
         return 'Pick an amount from ${opt.input!.min} to ${opt.input!.max}.';
       }
     }
     return null;
   }
 
-  static bool _inRange(Object? v, int? min, int? max) {
-    if (v is! num || !v.isFinite) return false;
+  /// A whole number in [min]..[max], on a multiple of [step] counted from
+  /// [min]. The top of the range (e.g. all in) is always allowed.
+  static bool _inRange(Object? v, int? min, int? max, int step) {
+    if (v is! num || !v.isFinite || v != v.roundToDouble()) return false;
     if (min != null && v < min) return false;
     if (max != null && v > max) return false;
+    if (step > 1 && min != null && v != max && (v.toInt() - min) % step != 0) return false;
     return true;
   }
 
@@ -360,14 +366,25 @@ class Platform implements GameContext {
   void _onPlayerQuit(String connId) {
     final playerId = _connToPlayer[connId];
     if (playerId == null) return;
-    if (inGame && _gamePlayerIds.contains(playerId)) {
-      _onLeave(connId); // keep the seat; the game decides what happens to them
-      return;
-    }
     _connToPlayer.remove(connId);
-    players.removeWhere((p) => p.id == playerId);
+    final p = _playerById(playerId);
+    if (p != null) {
+      p.connId = null;
+      _removeFromGame(p); // their token is gone, so the seat can't come back
+      players.remove(p);
+    }
     _broadcastLobby();
+    _pushScreens();
     _notify();
+  }
+
+  /// Take a player out of the running game for good and let the game react.
+  void _removeFromGame(Player p) {
+    if (!_gamePlayerIds.remove(p.id)) return;
+    _lastScreen.remove(p.id);
+    _lastSignature.remove(p.id);
+    activeGame?.onPlayerConnectionChanged(p.id, false);
+    activeGame?.onPlayerRemoved(p.id);
   }
 
   // ---------------------------------------------------------------- messages out
