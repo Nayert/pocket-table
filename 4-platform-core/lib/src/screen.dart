@@ -67,7 +67,9 @@ class Screen {
   });
 
   /// Nothing to do: show a message and a spinner.
-  factory Screen.waiting(String message,
+  /// [message] may be null when [title] says it all (e.g. a secret screen
+  /// whose body would otherwise hide a public status).
+  factory Screen.waiting(String? message,
           {String? title, List<String>? cards, List<String>? lines, int? secondsLeft, bool secret = false}) =>
       Screen._(ScreenKind.waiting,
           title: title, body: message, cards: cards, lines: lines, secondsLeft: secondsLeft, secret: secret);

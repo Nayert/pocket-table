@@ -135,6 +135,22 @@ void main() {
     expect((game.publicState()['rows'] as List).where((r) => r['value'] == 'alive').length, 8);
   });
 
+  test('a pick on a player who left does not split the kill', () {
+    fresh(8, {'doctor': false, 'detective': false});
+    final mafia = [for (final p in players) if (roleOf(p.id) == 'mafia') p.id];
+    final town = [for (final p in players) if (roleOf(p.id) != 'mafia') p.id];
+    for (final p in players) {
+      act(p.id, 'ready');
+    }
+    act(mafia[0], town[0]);
+    act(mafia[1], town[1]);
+    game.onPlayerRemoved(town[0]); // mafia[0]'s target left: only mafia[1]'s pick counts
+    game.timeoutForTesting();
+    final rows = game.publicState()['rows'] as List;
+    expect(rows.firstWhere((r) => r['label'] == 'P${town[1].substring(1)}')['value'], isNot('alive'));
+    expect(game.publicState()['log'], contains(contains('was killed')));
+  });
+
   test('a target who left during the night is not reported killed', () {
     fresh(6, {'doctor': true, 'detective': true});
     for (final p in players) {

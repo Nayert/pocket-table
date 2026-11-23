@@ -45,7 +45,9 @@ class OnlineTransport implements Transport {
 
   static String _toWsUrl(String url) {
     var u = url.trim();
-    if (u.endsWith('/')) u = u.substring(0, u.length - 1);
+    while (u.endsWith('/')) {
+      u = u.substring(0, u.length - 1);
+    }
     if (u.startsWith('https://')) {
       u = 'wss://${u.substring(8)}';
     } else if (u.startsWith('http://')) {
@@ -91,7 +93,13 @@ class OnlineTransport implements Transport {
         try {
           final req = await client.getUrl(uri).timeout(left);
           final res = await req.close().timeout(left);
-          final body = await res.transform(utf8.decoder).join().timeout(left);
+          // Read at most 4 KB: a wrong address could serve something huge.
+          final bytes = <int>[];
+          await for (final chunk in res.timeout(left)) {
+            bytes.addAll(chunk);
+            if (bytes.length > 4096) break;
+          }
+          final body = utf8.decode(bytes, allowMalformed: true);
           if (res.statusCode == 200) {
             final json = jsonDecode(body);
             if (json is Map && json['ok'] == true) return;
@@ -129,9 +137,27 @@ class OnlineTransport implements Transport {
     }
     _room = p['room'] as String;
     _hostToken = p['hostToken'] as String;
-    _joinInfo = JoinInfo(url: p['joinUrl'] as String, roomCode: _room!, mode: 'Online');
+    _joinInfo = JoinInfo(url: _safeJoinUrl(p['joinUrl'], _room!), roomCode: _room!, mode: 'Online');
     _setStatus(TransportStatus.connected);
     return _joinInfo!;
+  }
+
+  /// The QR link players open. Use the relay's link only if it points at the
+  /// relay we connected to; otherwise build it ourselves, so a misconfigured
+  /// or hostile relay can't send players to another site.
+  String _safeJoinUrl(Object? fromRelay, String room) {
+    final relay = Uri.parse(_wsUrl);
+    final own = Uri(
+      scheme: relay.scheme == 'wss' ? 'https' : 'http',
+      host: relay.host,
+      port: relay.hasPort ? relay.port : null,
+      path: '/',
+      queryParameters: {'room': room},
+    ).toString();
+    if (fromRelay is! String) return own;
+    final u = Uri.tryParse(fromRelay);
+    if (u == null || u.host != relay.host || (u.scheme != 'https' && u.scheme != 'http')) return own;
+    return fromRelay;
   }
 
   String _reason(Object? r) => switch (r) {

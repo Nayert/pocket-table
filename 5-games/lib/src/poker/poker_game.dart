@@ -542,7 +542,8 @@ class PokerGame extends Game {
     // Pot, board, to-call and chips are public anyway; only the hole cards are secret.
     final info = [..._tableLines(), 'Your chips: ${s.chips}'];
     if (s.folded) {
-      return Screen.waiting('You folded. Wait for the next hand.', cards: s.hole, lines: info, secret: true);
+      // Status goes in the title: a secret screen hides its body.
+      return Screen.waiting(null, title: 'You folded', cards: s.hole, lines: [...info, 'Wait for the next hand.'], secret: true);
     }
     if (_toAct >= 0 && _seats[_toAct] == s) {
       final o = _optionsFor(s);
@@ -557,7 +558,7 @@ class PokerGame extends Game {
       );
     }
     final who = _toAct >= 0 ? _seats[_toAct].name : 'the deal';
-    return Screen.waiting(s.allIn ? 'You are all in.' : 'Waiting for $who…', cards: s.hole, lines: info, secret: true);
+    return Screen.waiting(null, title: s.allIn ? 'You are all in' : 'Waiting for $who…', cards: s.hole, lines: info, secret: true);
   }
 
   @override

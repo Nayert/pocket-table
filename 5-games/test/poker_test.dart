@@ -510,4 +510,15 @@ void main() {
       }
     });
   });
+
+  test('secret poker screens keep public status out of the hidden body', () {
+    final ps = [for (final n in ['a', 'b', 'c']) Player(id: n, name: n.toUpperCase(), reconnectToken: 't$n')];
+    final g = PokerGame()..start(_Ctx(), ps, {'startingChips': 1000, 'bigBlind': 20, 'turnSeconds': 0});
+    for (final p in ps) {
+      final sc = g.privateState(p.id);
+      if (sc.secret) expect(sc.body, isNull, reason: 'body is hidden on secret screens: ${sc.title}');
+      expect(sc.title, isNotNull);
+    }
+    g.dispose();
+  });
 }

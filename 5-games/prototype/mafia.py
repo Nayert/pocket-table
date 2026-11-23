@@ -128,9 +128,11 @@ class Mafia:
         return self.rng.choice(sorted(c for c, n in tally.items() if n == top))
 
     def _resolve_night(self, acted):
-        # Mafia picks on themselves or a teammate don't count (no kill).
+        # Mafia picks on themselves or a teammate, or on someone who left
+        # during the night, are ignored.
         target = self._plurality([c for p, c in acted.items()
-                                  if self.roles[p] == MAFIA and self.roles.get(c) != MAFIA])
+                                  if self.roles[p] == MAFIA and self.roles.get(c) != MAFIA
+                                  and c in self.alive])
         saved = {c for p, c in acted.items() if self.roles[p] == DOCTOR}
         for p, c in acted.items():
             if self.roles[p] == DETECTIVE:

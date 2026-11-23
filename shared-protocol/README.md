@@ -75,7 +75,7 @@ The relay sets `from` on every player message to that player's `connId`, so play
 
 | Type | Payload |
 |------|---------|
-| `lobby.update` | `{ players: [{ id, name, connected }], selectedGame, maxPlayers }` |
+| `lobby.update` | `{ players: [{ id, name, connected }], selectedGame, maxPlayers }` (`selectedGame` is the display name, e.g. `"Poker"`) |
 | `game.started` | `{ game, name }` |
 | `game.ended` | `{}` (back to the lobby) |
 | `action.error` | `{ message }` |

@@ -168,6 +168,16 @@ class MafiaRules(unittest.TestCase):
         self.assertEqual(len(g.alive), 8)
         self.assertIn("nobody died", g.log[-1])
 
+    def test_pick_on_player_who_left_does_not_split_the_kill(self):
+        g = Mafia([f"p{i}" for i in range(8)], rng=random.Random(4), doctor=False, detective=False)
+        m1, m2 = [p for p in g.players if g.roles[p] == MAFIA]
+        town = [p for p in g.players if g.roles[p] != MAFIA]
+        g.timeout()  # reveal
+        g.act(m1, town[0]); g.act(m2, town[1])
+        g.remove_player(town[0])        # m1's target left: only m2's pick counts
+        g.timeout()
+        self.assertNotIn(town[1], g.alive)
+
     def test_target_who_left_is_not_reported_killed(self):
         g, roles = self.setup_game()
         victim = roles[VILLAGER][0]

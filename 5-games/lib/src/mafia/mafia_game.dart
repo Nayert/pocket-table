@@ -47,7 +47,7 @@ class MafiaGame extends Game {
         GameSetting.integer('mafiaCount', 'Mafia (0 = automatic)', defaultValue: 0, min: 0, max: 6),
         GameSetting.toggle('doctor', 'Doctor', defaultValue: true),
         GameSetting.toggle('detective', 'Detective', defaultValue: true),
-        GameSetting.toggle('revealRoles', 'Reveal roles when voted out', defaultValue: true),
+        GameSetting.toggle('revealRoles', 'Reveal the roles of players who are out', defaultValue: true),
         GameSetting.toggle('majorityVote', 'Need a majority of the living to vote someone out', defaultValue: false),
         GameSetting.integer('nightSeconds', 'Night (seconds)', defaultValue: 60, min: 20, max: 300, step: 10),
         GameSetting.integer('daySeconds', 'Discussion (seconds)', defaultValue: 180, min: 30, max: 900, step: 30),
@@ -214,6 +214,13 @@ class MafiaGame extends Game {
     _enter(_Phase.values.byName(phase));
   }
 
+  /// Test-only: behave as if the current phase's timer ran out.
+  @visibleForTesting
+  void timeoutForTesting() {
+    _endPhase();
+    _ctx.requestUpdate();
+  }
+
   /// Test-only: who has which role.
   @visibleForTesting
   Map<String, String> get rolesForTesting => {for (final e in _roles.entries) e.key: e.value.name};
@@ -270,10 +277,14 @@ class MafiaGame extends Game {
   }
 
   void _resolveNight(Map<String, String> acted) {
-    // Mafia picks on themselves or a teammate don't count (no kill).
+    // Mafia picks on themselves or a teammate, or on someone who left
+    // during the night, are ignored.
     final target = _plurality([
       for (final e in acted.entries)
-        if (_roles[e.key] == Role.mafia && _roles[e.value] != Role.mafia) e.value
+        if (_roles[e.key] == Role.mafia &&
+            _roles[e.value] != Role.mafia &&
+            _alive.contains(e.value))
+          e.value
     ]);
     final saved = {for (final e in acted.entries) if (_roles[e.key] == Role.doctor) e.value};
     for (final e in acted.entries) {
@@ -380,7 +391,7 @@ class MafiaGame extends Game {
           Role.mafia => [
               'Who should the Mafia kill?',
               'Your team: ${[for (final id in _mafiaIds) _name(id)].join(', ')}',
-              'Picking yourself or a teammate counts as no kill. If you disagree, the most picks wins (ties are random).',
+              'A pick on yourself or a teammate is ignored. If you disagree, the most picks wins (ties are random).',
             ],
           Role.doctor => ['Who will you protect? You can protect yourself.'],
           Role.detective => ['Who will you investigate?'],

@@ -112,4 +112,14 @@ void main() {
     expect(find.text('Mafia · Room TEST'), findsOneWidget);
     c.endGame();
   });
+
+  test('plain http relays are refused unless they are on the local network', () {
+    expect(HostController.insecureRelayProblem('https://pocket-table-relay.onrender.com'), isNull);
+    expect(HostController.insecureRelayProblem('http://192.168.1.20:8000'), isNull);
+    expect(HostController.insecureRelayProblem('http://localhost:8000'), isNull);
+    expect(HostController.insecureRelayProblem('http://10.0.0.5:8000'), isNull);
+    expect(HostController.insecureRelayProblem('http://example.com'), isNotNull);
+    expect(HostController.insecureRelayProblem('ws://8.8.8.8'), isNotNull);
+    expect(HostController.insecureRelayProblem('http://172.32.0.1'), isNotNull);
+  });
 }

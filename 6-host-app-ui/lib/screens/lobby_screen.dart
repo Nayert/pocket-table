@@ -214,7 +214,7 @@ Future<void> confirmKick(BuildContext context, HostController controller, String
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text('Remove $name?'),
-      content: const Text("They'll be disconnected and can't rejoin this game."),
+      content: const Text("They'll be disconnected and lose their seat. During a game they can't come back until it ends."),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
         FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Remove')),

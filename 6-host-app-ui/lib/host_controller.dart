@@ -61,13 +61,13 @@ class HostController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    relayUrl = u;
-    if (_device) {
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(_relayKey, relayUrl);
-      } catch (_) {/* not fatal */}
+    final insecure = insecureRelayProblem(u);
+    if (insecure != null) {
+      error = insecure;
+      notifyListeners();
+      return;
     }
+    relayUrl = u;
 
     final attempt = ++_attempt;
     error = null;
@@ -94,7 +94,34 @@ class HostController extends ChangeNotifier {
     }
     if (attempt != _attempt) return; // cancelled while waking
     _stopWaking();
+    if (_device) {
+      // Remember the address only once it has actually answered.
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_relayKey, relayUrl);
+      } catch (_) {/* not fatal */}
+    }
     await _host(() => OnlineTransport(relayUrl: relayUrl, maxPlayers: platform.maxPlayers));
+  }
+
+  /// Everything (roles, cards, seat tokens) goes through the relay, so a
+  /// relay on the internet must use https/wss. Plain http/ws is only allowed
+  /// for addresses on your own network (testing a relay on your computer).
+  static String? insecureRelayProblem(String url) {
+    final u = url.trim().toLowerCase();
+    if (!u.startsWith('http://') && !u.startsWith('ws://')) return null;
+    final host = Uri.tryParse(u)?.host ?? '';
+    if (_isLocalHost(host)) return null;
+    return 'Use an https:// address for a server on the internet. Plain http:// would let others '
+        'on the network read roles, cards and seat tokens. (http:// works only for addresses on your own network.)';
+  }
+
+  static bool _isLocalHost(String h) {
+    if (h == 'localhost' || h.endsWith('.local')) return true;
+    final m = RegExp(r'^(\d+)\.(\d+)\.\d+\.\d+$').firstMatch(h);
+    if (m == null) return false;
+    final a = int.parse(m.group(1)!), b = int.parse(m.group(2)!);
+    return a == 127 || a == 10 || (a == 192 && b == 168) || (a == 172 && b >= 16 && b <= 31);
   }
 
   /// Give up waiting for the relay to wake.
