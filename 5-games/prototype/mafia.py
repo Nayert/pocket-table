@@ -53,12 +53,10 @@ class Mafia:
             return ["ready"]
         others = [p for p in self.players if p in self.alive and p != pid]
         if self.phase == "night":
-            role = self.roles[pid]
-            if role == MAFIA:
-                return [p for p in others if self.roles[p] != MAFIA]
-            if role == DOCTOR:
-                return [p for p in self.players if p in self.alive]
-            return others  # detective checks; villagers pick a decoy "suspect"
+            # Everyone gets the same list (every living player, themselves
+            # included), so a glance at someone's phone can't tell their role.
+            # Role rules are applied when the night resolves.
+            return [p for p in self.players if p in self.alive]
         if self.phase == "vote":
             return others + [NOBODY]
         return []
@@ -130,13 +128,15 @@ class Mafia:
         return self.rng.choice(sorted(c for c, n in tally.items() if n == top))
 
     def _resolve_night(self, acted):
-        target = self._plurality([c for p, c in acted.items() if self.roles[p] == MAFIA])
+        # Mafia picks on themselves or a teammate don't count (no kill).
+        target = self._plurality([c for p, c in acted.items()
+                                  if self.roles[p] == MAFIA and self.roles.get(c) != MAFIA])
         saved = {c for p, c in acted.items() if self.roles[p] == DOCTOR}
         for p, c in acted.items():
             if self.roles[p] == DETECTIVE:
                 is_mafia = self.roles[c] == MAFIA
                 self.detective_results[p] = f"{c} is {'' if is_mafia else 'NOT '}Mafia"
-        if target and target not in saved:
+        if target and target in self.alive and target not in saved:
             self.alive.discard(target)
             self.log.append(f"Night {self.round}: {target} was killed.")
         else:

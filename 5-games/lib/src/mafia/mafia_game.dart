@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:meta/meta.dart';
 import 'package:platform_core/platform_core.dart';
 
 /// Ported from prototype/mafia.py (which has the tests that pin the rules down).
@@ -142,12 +143,10 @@ class MafiaGame extends Game {
       case _Phase.reveal || _Phase.dawn || _Phase.day || _Phase.verdict:
         return const [_ready];
       case _Phase.night:
-        final others = [for (final p in _alivePlayers) if (p.id != pid) p.id];
-        return switch (_roles[pid]!) {
-          Role.mafia => [for (final id in others) if (_roles[id] != Role.mafia) id],
-          Role.doctor => [for (final p in _alivePlayers) p.id],
-          _ => others, // detective investigates; villagers pick a decoy "suspect"
-        };
+        // Everyone gets the same list (every living player, themselves
+        // included), so a glance at someone's phone can't tell their role.
+        // Role rules are applied when the night resolves.
+        return [for (final p in _alivePlayers) p.id];
       case _Phase.vote:
         return [for (final p in _alivePlayers) if (p.id != pid) p.id, _nobody];
       case _Phase.over:
@@ -209,12 +208,14 @@ class MafiaGame extends Game {
   }
 
   /// Test-only: jump straight to a phase (e.g. 'vote') with nobody having acted.
+  @visibleForTesting
   void forcePhaseForTesting(String phase) {
     _acted.clear();
     _enter(_Phase.values.byName(phase));
   }
 
   /// Test-only: who has which role.
+  @visibleForTesting
   Map<String, String> get rolesForTesting => {for (final e in _roles.entries) e.key: e.value.name};
 
   void _enter(_Phase phase) {
@@ -269,7 +270,11 @@ class MafiaGame extends Game {
   }
 
   void _resolveNight(Map<String, String> acted) {
-    final target = _plurality([for (final e in acted.entries) if (_roles[e.key] == Role.mafia) e.value]);
+    // Mafia picks on themselves or a teammate don't count (no kill).
+    final target = _plurality([
+      for (final e in acted.entries)
+        if (_roles[e.key] == Role.mafia && _roles[e.value] != Role.mafia) e.value
+    ]);
     final saved = {for (final e in acted.entries) if (_roles[e.key] == Role.doctor) e.value};
     for (final e in acted.entries) {
       if (_roles[e.key] == Role.detective) {
@@ -277,7 +282,7 @@ class MafiaGame extends Game {
         _detectiveResults[e.key] = '${_name(e.value)} is ${isMafia ? '' : 'NOT '}Mafia.';
       }
     }
-    if (target != null && !saved.contains(target)) {
+    if (target != null && _alive.contains(target) && !saved.contains(target)) {
       _alive.remove(target);
       _nightResult = 'Night $_round: ${_name(target)} was killed.';
     } else {
@@ -371,21 +376,16 @@ class MafiaGame extends Game {
         );
 
       case _Phase.night:
-        final prompt = switch (role) {
-          Role.mafia => 'Who should the Mafia kill? Agree with your team. If you disagree, the most votes wins.',
-          Role.doctor => 'Who will you protect?',
-          Role.detective => 'Who will you investigate?',
-          Role.villager => 'Who do you suspect? Everyone taps something at night so no one can tell who has a power.',
+        final body = switch (role) {
+          Role.mafia => [
+              'Who should the Mafia kill?',
+              'Your team: ${[for (final id in _mafiaIds) _name(id)].join(', ')}',
+              'Picking yourself or a teammate counts as no kill. If you disagree, the most picks wins (ties are random).',
+            ],
+          Role.doctor => ['Who will you protect? You can protect yourself.'],
+          Role.detective => ['Who will you investigate?'],
+          Role.villager => ['Who do you suspect? Everyone taps something at night so no one can tell who has a power.'],
         };
-        final body = [prompt];
-        if (role == Role.mafia) {
-          for (final id in _mafiaIds) {
-            if (id != pid && _alive.contains(id)) {
-              final pick = _acted[id];
-              body.add('${_name(id)}: ${pick == null ? 'deciding…' : _name(pick)}');
-            }
-          }
-        }
         return Screen.choice(
           actionId: _actionId,
           title: 'Night $_round',

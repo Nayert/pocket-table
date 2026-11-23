@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:meta/meta.dart';
 import 'package:platform_core/platform_core.dart';
 
 import 'cards.dart';
@@ -44,8 +45,11 @@ class PokerGame extends Game {
   /// stacks. By default the deck is shuffled with the platform's secure random.
   PokerGame({this.deckForTesting, this.dealerForTesting, this.chipsForTesting});
 
+  @visibleForTesting
   final List<String>? deckForTesting;
+  @visibleForTesting
   final int? dealerForTesting;
+  @visibleForTesting
   final Map<String, int>? chipsForTesting;
 
   @override
@@ -122,7 +126,14 @@ class PokerGame extends Game {
     } else if (!connected && _phase == _Phase.handOver && _allReady()) {
       _startHand();
     } else if (_phase == _Phase.betting && _toAct >= 0 && _seats[_toAct] == s) {
-      _setTurnTimer(); // grace timer for a disconnected player, normal one when they're back
+      // The deadline is fixed when the turn starts. Disconnecting can only
+      // shorten it (to the grace period); reconnecting never extends it, so
+      // toggling the connection can't buy more time.
+      if (!connected) {
+        final grace = DateTime.now().add(const Duration(seconds: _disconnectedGraceSeconds));
+        final current = _deadline;
+        if (current == null || grace.isBefore(current)) _setTimerAt(grace, _onTimeout);
+      }
     }
     if (before != (_phase, _hand, _toAct, _street)) _ctx.requestUpdate();
   }
@@ -160,6 +171,7 @@ class PokerGame extends Game {
   bool _allReady() => _seats.where((x) => x.canPlay).every((x) => x.readyForNext);
 
   /// Test-only: what happens when the turn / next-hand timer runs out.
+  @visibleForTesting
   void timeoutForTesting() => _onTimeout();
 
   // ------------------------------------------------------------- dealing
@@ -441,8 +453,8 @@ class PokerGame extends Game {
     }
   }
 
-  /// Timer for the seat to act: the turn limit, or a grace period (at most 20s)
-  /// if that player is disconnected.
+  /// Start the timer for a new turn: the turn limit (none if 0), or at most the
+  /// grace period if that player is disconnected. Called once per turn only.
   void _setTurnTimer() {
     var secs = _turnSeconds > 0 ? _turnSeconds : null;
     if (!_seats[_toAct].connected) {
@@ -468,12 +480,16 @@ class PokerGame extends Game {
     handleAction(s.id, PlayerAction(actionId: _actionId, choice: [canCheck ? 'check' : 'fold']));
   }
 
-  void _setTimer(Duration? d, [void Function()? onFire]) {
+  void _setTimer(Duration? d, [void Function()? onFire]) =>
+      _setTimerAt(d == null ? null : DateTime.now().add(d), onFire);
+
+  void _setTimerAt(DateTime? deadline, [void Function()? onFire]) {
     _timer?.cancel();
     _timer = null;
-    _deadline = d == null ? null : DateTime.now().add(d);
-    if (d != null && onFire != null) {
-      _timer = Timer(d, () {
+    _deadline = deadline;
+    if (deadline != null && onFire != null) {
+      final d = deadline.difference(DateTime.now());
+      _timer = Timer(d.isNegative ? Duration.zero : d, () {
         onFire();
         _ctx.requestUpdate();
       });

@@ -89,6 +89,84 @@ void main() {
   String roleOf(String pid) => game.rolesForTesting[pid]!;
   String withRole(String role) => game.rolesForTesting.entries.firstWhere((e) => e.value == role).key;
 
+  test('night picks: not-on-the-list and repeats are rejected, role-specific ones are not', () {
+    fresh(6, {'doctor': true, 'detective': true});
+    for (final p in players) {
+      act(p.id, 'ready');
+    }
+    final m = withRole('mafia');
+    final s = game.privateState(m);
+    expect(game.handleAction(m, PlayerAction(actionId: s.actionId!, choice: ['nobody'])).ok, isFalse);
+    expect(game.handleAction(m, PlayerAction(actionId: s.actionId!, choice: ['zz'])).ok, isFalse);
+    expect(game.handleAction(m, PlayerAction(actionId: 'wrong', choice: [withRole('villager')])).ok, isFalse);
+    final v = players.map((p) => p.id).firstWhere((id) => roleOf(id) == 'villager');
+    expect(game.handleAction(m, PlayerAction(actionId: s.actionId!, choice: [v])).ok, isTrue);
+    expect(game.handleAction(m, PlayerAction(actionId: s.actionId!, choice: [v])).ok, isFalse);
+  });
+
+  test('night options are identical for every role', () {
+    fresh(8, {'doctor': true, 'detective': true});
+    for (final p in players) {
+      act(p.id, 'ready');
+    }
+    final lists = {
+      for (final p in players) roleOf(p.id): game.privateState(p.id).options.map((o) => o.id).toList(),
+    };
+    expect(lists.keys, containsAll(['mafia', 'doctor', 'detective', 'villager']));
+    expect({for (final l in lists.values) l.join(',')}.length, 1);
+    expect(lists['mafia']!, [for (final p in players) p.id]);
+  });
+
+  test('mafia picking self or a teammate kills nobody', () {
+    fresh(8, {'doctor': false, 'detective': false});
+    final mafia = [for (final p in players) if (roleOf(p.id) == 'mafia') p.id];
+    expect(mafia.length, 2);
+    for (final p in players) {
+      act(p.id, 'ready');
+    }
+    act(mafia[0], mafia[0]);
+    act(mafia[1], mafia[0]);
+    for (final p in players) {
+      if (!mafia.contains(p.id)) act(p.id, p.id);
+    }
+    expect(title(), startsWith('Morning'));
+    expect(game.publicState()['log'], contains(contains('nobody died')));
+    expect(game.publicState()['subtitle'], contains('/8 ready'));
+    expect((game.publicState()['rows'] as List).where((r) => r['value'] == 'alive').length, 8);
+  });
+
+  test('a target who left during the night is not reported killed', () {
+    fresh(6, {'doctor': true, 'detective': true});
+    for (final p in players) {
+      act(p.id, 'ready');
+    }
+    final victim = players.map((p) => p.id).firstWhere((id) => roleOf(id) == 'villager');
+    act(withRole('mafia'), victim);
+    game.onPlayerRemoved(victim);
+    for (final p in players) {
+      if (p.id != victim && game.privateState(p.id).options.isNotEmpty) act(p.id, p.id);
+    }
+    expect(game.publicState()['log'], contains(contains('nobody died')));
+    expect(game.publicState()['log'], isNot(contains(contains('was killed'))));
+  });
+
+  test("a mafia member's night screen does not change when a teammate acts", () {
+    fresh(8, {'doctor': false, 'detective': false});
+    final mafia = [for (final p in players) if (roleOf(p.id) == 'mafia') p.id];
+    for (final p in players) {
+      act(p.id, 'ready');
+    }
+    final before = game.privateState(mafia[0]).signature;
+    act(mafia[1], players.first.id);
+    expect(game.privateState(mafia[0]).signature, before);
+    // After acting, the waiting screen is static too.
+    act(mafia[0], players.first.id);
+    final waiting = game.privateState(mafia[0]).signature;
+    final other = players.map((p) => p.id).firstWhere((id) => !mafia.contains(id));
+    act(other, other);
+    expect(game.privateState(mafia[0]).signature, waiting);
+  });
+
   test('mafia count is capped so mafia start outnumbered', () {
     fresh(5, {'mafiaCount': 4});
     expect(game.rolesForTesting.values.where((r) => r == 'mafia').length, 2);

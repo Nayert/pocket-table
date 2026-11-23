@@ -110,18 +110,31 @@ class Platform implements GameContext {
     _notify();
   }
 
-  /// Starts the selected game. Returns an error message, or null on success.
-  String? startGame() {
+  /// Why the selected game can't start right now, or null if it can.
+  /// The host UI shows this under a disabled Start button.
+  String? get startProblem {
     final template = selectedGame;
     if (template == null) return 'Pick a game first.';
     if (inGame) return 'A game is already running.';
+    final n = connectedPlayers.length;
+    if (n < template.minPlayers) {
+      final more = template.minPlayers - n;
+      return '${template.displayName} needs at least ${template.minPlayers} players '
+          '($more more to join).';
+    }
+    if (n > template.maxPlayers) {
+      return '${template.displayName} allows at most ${template.maxPlayers} players. '
+          'Remove ${n - template.maxPlayers}.';
+    }
+    return null;
+  }
+
+  /// Starts the selected game. Returns an error message, or null on success.
+  String? startGame() {
+    final problem = startProblem;
+    if (problem != null) return problem;
+    final template = selectedGame!;
     final seated = connectedPlayers;
-    if (seated.length < template.minPlayers) {
-      return '${template.displayName} needs at least ${template.minPlayers} players.';
-    }
-    if (seated.length > template.maxPlayers) {
-      return '${template.displayName} allows at most ${template.maxPlayers} players.';
-    }
     // Drop anyone who left the lobby before we started.
     players.removeWhere((p) => !p.connected);
 
@@ -283,7 +296,8 @@ class Platform implements GameContext {
       return;
     }
 
-    final choice = ((p['choice'] as List?) ?? const []).map((e) => e.toString()).toList();
+    final rawChoice = p['choice'];
+    final choice = rawChoice is List ? rawChoice.map((e) => e.toString()).toList() : <String>[];
     final action = PlayerAction(actionId: p['actionId'] as String, choice: choice, value: p['value']);
     final result = game.handleAction(playerId, action);
     if (!result.ok) {
@@ -383,7 +397,8 @@ class Platform implements GameContext {
     if (!_gamePlayerIds.remove(p.id)) return;
     _lastScreen.remove(p.id);
     _lastSignature.remove(p.id);
-    activeGame?.onPlayerConnectionChanged(p.id, false);
+    // Only onPlayerRemoved: a separate "disconnected" call first could let a
+    // game finish the phase with the leaver's last choice still counted.
     activeGame?.onPlayerRemoved(p.id);
   }
 

@@ -176,4 +176,24 @@ void main() {
     expect(game.removed, [cal]);
     expect(t.lastTo('c3', type: 'room.closed')!['payload']['reason'], 'kicked');
   });
+
+  test('startProblem explains why Start is disabled', () {
+    expect(platform.startProblem, contains('2 more'));
+    join('c1', 'Ana');
+    expect(platform.startProblem, contains('1 more'));
+    join('c2', 'Ben');
+    expect(platform.startProblem, isNull);
+    platform.startGame();
+    expect(platform.startProblem, contains('already running'));
+  });
+
+  test('a malformed choice is refused, not a crash', () {
+    join('c1', 'Ana');
+    join('c2', 'Ben');
+    platform.startGame();
+    t.simulateMessage('c1', 'action', {'actionId': 'press', 'choice': 'a'});
+    t.simulateMessage('c1', 'action', {'actionId': 'press', 'choice': {'x': 1}});
+    expect((platform.activeGame as _PressGame).pressed, isEmpty);
+    expect(t.lastTo('c1', type: 'action.error'), isNotNull);
+  });
 }

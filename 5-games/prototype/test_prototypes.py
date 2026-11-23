@@ -145,7 +145,37 @@ class MafiaRules(unittest.TestCase):
         g, roles = self.setup_game()
         m = roles[MAFIA][0]
         with self.assertRaises(ValueError):
-            g.act(m, m)  # mafia can't target themselves
+            g.act(m, NOBODY)  # "nobody" is only a day-vote option
+        with self.assertRaises(ValueError):
+            g.act(m, "zz")    # not a player
+        g.act(m, roles[VILLAGER][0])
+        with self.assertRaises(ValueError):
+            g.act(m, roles[VILLAGER][0])  # can't act twice
+
+    def test_night_options_identical_for_every_role(self):
+        g, roles = self.setup_game()
+        lists = {r: g.options(ps[0]) for r, ps in roles.items()}
+        self.assertEqual(len({tuple(v) for v in lists.values()}), 1)
+        self.assertEqual(sorted(lists[MAFIA]), sorted(g.alive))
+
+    def test_mafia_picking_self_or_teammate_kills_nobody(self):
+        g = Mafia([f"p{i}" for i in range(8)], rng=random.Random(4), doctor=False, detective=False)
+        mafia = [p for p in g.players if g.roles[p] == MAFIA]
+        self.assertEqual(len(mafia), 2)
+        g.timeout()  # reveal
+        g.act(mafia[0], mafia[0]); g.act(mafia[1], mafia[0])
+        g.timeout()
+        self.assertEqual(len(g.alive), 8)
+        self.assertIn("nobody died", g.log[-1])
+
+    def test_target_who_left_is_not_reported_killed(self):
+        g, roles = self.setup_game()
+        victim = roles[VILLAGER][0]
+        for m in roles[MAFIA]:
+            g.act(m, victim)
+        g.remove_player(victim)
+        g.timeout()
+        self.assertIn("nobody died", [l for l in g.log if l.startswith("Night")][-1])
 
 
     def test_mafia_count_is_capped(self):

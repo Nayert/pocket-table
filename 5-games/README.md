@@ -15,12 +15,28 @@ Each game is one self-contained class implementing the `Game` interface from lay
 - Win checks (town wins / mafia wins)
 - Narrator screen on the host showing phase and prompts
 
+Rules in detail (pinned by `prototype/test_prototypes.py`):
+
+- **Roles:** Mafia = the setting, or automatic (players ÷ 4, at least 1), and always capped so the Mafia start outnumbered. One Doctor and one Detective if enabled and there's room. The minimum game is 4 players: Mafia, Doctor, Detective and Villager.
+- **Night:** everyone (villagers too) picks from the same list, every living player including themselves, so a glance at a phone can't reveal a role. The Mafia's most-picked target dies unless the Doctor protected them. Ties are broken at random, and Mafia picks on themselves or a teammate count as no kill. The Detective privately learns whether their pick is Mafia.
+- **Vote:** the player with the most votes is out, unless there's a tie for most or "Nobody" leads. With the *majority* setting they also need more than half of the living players' votes.
+- **Timers and absence:** each phase has a timer, and missing actions count as no action or abstain. A phase ends early once every living, *connected* player has acted. A player who leaves or is kicked dies (role revealed if the setting is on), which can end the game.
+- **Privacy:** roles and night results go only in a `secret` screen's body. Titles, lines and options are the same for every role.
+
 ### Poker (Texas Hold'em)
 
 - Secure shuffle (`Random.secure()`), dealing hole and community cards
 - Betting rounds, blinds, chips, folding, all-in
 - Hand evaluator and side pots
 - Play chips only — no real money
+
+Rules in detail (pinned by `prototype/poker.py` + tests):
+
+- **Blinds:** the small blind is left of the dealer and the big blind is next. Heads-up, the dealer posts the small blind and acts first before the flop. The button moves one live seat each hand.
+- **Raises:** the minimum raise is the last full bet or raise (the big blind to start). Anyone may go all in for less, but a short all-in doesn't reopen raising for players who already acted.
+- **Side pots** come from each player's total contribution, and an uncalled excess goes back to the player. At a split, the odd chips go to the first winner left of the dealer.
+- **Absence:** a disconnected player on their turn is auto-checked or folded after 20 s, or sooner if the turn timer runs out first. Reconnecting never extends the turn. Disconnected players sit out new hands, and if fewer than two can play, the game waits. A player who leaves or is kicked folds and is never dealt in again.
+- **End:** busted players watch, and the game ends when fewer than two players who haven't left have chips.
 
 ## What it needs from other layers
 

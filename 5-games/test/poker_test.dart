@@ -415,7 +415,7 @@ void main() {
       g.onPlayerConnectionChanged('a', false); // a is to act
       expect(g.publicState()['secondsLeft'], inInclusiveRange(19, 20));
       g.onPlayerConnectionChanged('a', true);
-      expect(g.publicState()['secondsLeft'], inInclusiveRange(59, 60));
+      expect(g.publicState()['secondsLeft'], inInclusiveRange(19, 20)); // reconnecting never extends it
 
       newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 10);
       g.onPlayerConnectionChanged('a', false);
@@ -425,6 +425,33 @@ void main() {
       expect(g.publicState()['secondsLeft'], isNull);
       g.onPlayerConnectionChanged('a', false);
       expect(g.publicState()['secondsLeft'], inInclusiveRange(19, 20));
+    });
+
+    test('disconnect/reconnect cannot push the turn deadline later', () {
+      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 60);
+      g.onPlayerConnectionChanged('a', false);
+      final shortened = g.publicState()['secondsLeft'] as int;
+      expect(shortened, inInclusiveRange(19, 20));
+      for (var i = 0; i < 5; i++) {
+        g.onPlayerConnectionChanged('a', true);
+        g.onPlayerConnectionChanged('a', false);
+      }
+      g.onPlayerConnectionChanged('a', true);
+      expect(g.publicState()['secondsLeft'] as int, lessThanOrEqualTo(shortened));
+
+      // No turn limit: the grace deadline set on disconnect also survives reconnecting.
+      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 0);
+      g.onPlayerConnectionChanged('a', false);
+      g.onPlayerConnectionChanged('a', true);
+      g.onPlayerConnectionChanged('a', false);
+      g.onPlayerConnectionChanged('a', true);
+      expect(g.publicState()['secondsLeft'], inInclusiveRange(19, 20));
+
+      // A short turn limit is not extended up to the grace period either.
+      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 10);
+      g.onPlayerConnectionChanged('a', false);
+      g.onPlayerConnectionChanged('a', true);
+      expect(g.publicState()['secondsLeft'] as int, lessThanOrEqualTo(10));
     });
 
     test('random games conserve chips', () {
