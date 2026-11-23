@@ -35,6 +35,7 @@ const state = {
   playerId: null,
   joined: false,     // host has accepted us (join.ok)
   wantSeat: false,   // we should keep trying to (re)connect
+  resuming: false,   // rejoining a saved seat (retry instead of giving up)
   inGame: false,
   hostAway: false,
   lobby: null,
@@ -50,14 +51,41 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
 };
 const tokenKey = (room) => "pg.token." + room;
+const TOKEN_MAX_AGE_MS = 12 * 60 * 60 * 1000; // longer than any room lives
+
+// Seat tokens are saved with a timestamp; old or malformed ones are dropped.
+function getToken(room) {
+  const raw = store.get(tokenKey(room));
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v.t === "string" && Date.now() - v.at < TOKEN_MAX_AGE_MS) return v.t;
+  } catch { /* fall through */ }
+  store.del(tokenKey(room));
+  return null;
+}
+function saveToken(room, token) {
+  // Only one seat is remembered: forget seats in other rooms.
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("pg.token.") && k !== tokenKey(room)) localStorage.removeItem(k);
+    }
+  } catch { /* ignore */ }
+  store.set(tokenKey(room), JSON.stringify({ t: token, at: Date.now() }));
+}
 
 // ---- input cleaning (mirrors the host's rules so errors show before sending) ----
 function cleanCode(raw) {
   return String(raw || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, CODE_LENGTH);
 }
 function cleanName(raw) {
+  // Control characters and invisible formatting characters (zero-width,
+  // direction overrides) are removed so nobody can look like someone else.
+  let s = String(raw || "");
+  try { s = s.normalize("NFKC"); } catch { /* old browser */ }
   // eslint-disable-next-line no-control-regex
-  return String(raw || "").replace(/[\x00-\x1F\x7F]/g, "").trim();
+  return s.replace(/[\x00-\x1F\x7F\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g, "").trim();
 }
 
 // ---- views ----
@@ -149,7 +177,7 @@ function connect() {
       v: PROTOCOL_VERSION,
       room: state.room,
       name: state.name,
-      reconnectToken: store.get(tokenKey(state.room)) || undefined,
+      reconnectToken: getToken(state.room) || undefined,
     });
   };
 
@@ -168,9 +196,10 @@ function onDrop(ws) {
   if (ws && state.ws !== ws) return; // an old socket we already replaced
   clearTimeout(state.connectTimer);
   state.ws = null;
+  Screens.hideSecret();
   if (!state.wantSeat) return;
 
-  if (!state.joined && !store.get(tokenKey(state.room))) {
+  if (!state.joined && !state.resuming) {
     // First attempt, never got in: let them fix the code or their network.
     state.wantSeat = false;
     showJoin(navigator.onLine === false
@@ -214,6 +243,7 @@ function closeSocket() {
 
 function resetSeat() {
   state.joined = false;
+  state.resuming = false;
   state.inGame = false;
   state.hostAway = false;
   state.playerId = null;
@@ -255,7 +285,8 @@ function handle(type, p) {
       state.joined = true;
       state.playerId = typeof p.playerId === "string" ? p.playerId : null;
       state.failures = 0;
-      if (typeof p.reconnectToken === "string") store.set(tokenKey(state.room), p.reconnectToken);
+      state.resuming = false;
+      if (typeof p.reconnectToken === "string") saveToken(state.room, p.reconnectToken);
       store.set("pg.name", state.name);
       setConn(state.hostAway ? "host_away" : "connected");
       showGameView();
@@ -265,7 +296,7 @@ function handle(type, p) {
     case "join.error": {
       const reason = String(p.reason || "");
       const msg = JOIN_ERRORS[reason] || "Couldn't join (" + reason + ").";
-      const hadSeat = state.joined || !!store.get(tokenKey(state.room));
+      const hadSeat = state.joined || state.resuming;
       store.del(tokenKey(state.room));
       closeSocket();
       resetSeat();
@@ -376,13 +407,32 @@ function init() {
   $("banner-retry").addEventListener("click", retryNow);
   $("closed-btn").addEventListener("click", () => { state.room = ""; showJoin(); roomInput.value = ""; roomInput.focus(); });
 
-  // Came back from a refresh or a locked screen with a saved seat: rejoin straight away.
-  if (room && name && store.get(tokenKey(room))) {
-    state.room = room;
-    state.name = cleanName(name);
-    state.wantSeat = true;
-    showWaitingSeat();
-    connect();
+  // Came back after a refresh with a saved seat. Phones get passed around at
+  // parties, so ask before taking the seat back instead of doing it silently.
+  if (room && name && getToken(room)) {
+    $("resume-text").textContent = `Continue as ${cleanName(name)} in room ${room}?`;
+    $("resume-box").classList.remove("hidden");
+    $("join-form").classList.add("hidden");
+    $("resume-btn").addEventListener("click", () => {
+      $("resume-box").classList.add("hidden");
+      $("join-form").classList.remove("hidden");
+      state.room = room;
+      state.name = cleanName(name);
+      state.wantSeat = true;
+      state.resuming = true;
+      state.failures = 0;
+      showWaitingSeat();
+      connect();
+    });
+    $("not-me-btn").addEventListener("click", () => {
+      store.del(tokenKey(room));
+      store.del("pg.name");
+      nameInput.value = "";
+      $("resume-box").classList.add("hidden");
+      $("join-form").classList.remove("hidden");
+      nameInput.focus();
+    });
+    $("resume-btn").focus();
   } else if (room) {
     nameInput.focus();
   }
@@ -394,7 +444,10 @@ function init() {
       connect();
     }
   };
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") wake(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") wake();
+    else Screens.hideSecret(); // phone locked or put down: cover roles and cards again
+  });
   window.addEventListener("online", wake);
   window.addEventListener("pageshow", (e) => { if (e.persisted) wake(); });
 }

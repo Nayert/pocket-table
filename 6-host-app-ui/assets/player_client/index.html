@@ -25,6 +25,11 @@
     <!-- Join screen is shown until the host accepts us -->
     <section id="join-view" class="view" aria-labelledby="join-title">
       <h1 id="join-title">Party Games</h1>
+      <div id="resume-box" class="hidden">
+        <div class="card body-text" id="resume-text"></div>
+        <button id="resume-btn" class="btn primary" type="button">Continue</button>
+        <button id="not-me-btn" class="btn" type="button">Not me: join as someone new</button>
+      </div>
       <form id="join-form" autocomplete="off" novalidate>
         <label for="room-input">Room code</label>
         <input id="room-input" class="big-input code-input" maxlength="4" inputmode="text"

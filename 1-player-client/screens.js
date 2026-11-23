@@ -8,6 +8,7 @@ const Screens = (() => {
   let lastKey = "";          // type + actionId of the screen on show
   let draft = null;          // in-progress choice on that screen (kept across re-renders)
   let revealedKey = null;    // the secret on show, if the player tapped "reveal"
+  let redrawSecret = null;   // redraws the secret box on screen, if any
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -116,6 +117,7 @@ const Screens = (() => {
       draw();
     });
     draw();
+    redrawSecret = draw;
     box.append(toggle, inner);
     return box;
   }
@@ -381,6 +383,7 @@ const Screens = (() => {
     lastKey = key;
     const keepScroll = changed ? 0 : window.scrollY;
     container.replaceChildren();
+    redrawSecret = null;
     const fn = RENDERERS[type];
     if (!fn) {
       container.appendChild(el("p", "error", "This page is out of date. Please refresh."));
@@ -418,6 +421,12 @@ const Screens = (() => {
       ? "The host is reconnecting…" : "Waiting for the host to start…"));
   }
 
+  // Cover the secret again (page hidden, connection lost).
+  function hideSecret() {
+    revealedKey = null;
+    if (redrawSecret) redrawSecret();
+  }
+
   // Forget per-game state (reveals, drafts) when a game ends or we leave.
   function reset() {
     clearInterval(countdownTimer);
@@ -435,5 +444,5 @@ const Screens = (() => {
     toastTimer = setTimeout(() => t.classList.add("hidden"), 3500);
   }
 
-  return { render, renderLobby, toast, reset };
+  return { render, renderLobby, toast, reset, hideSecret };
 })();

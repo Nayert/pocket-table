@@ -33,7 +33,9 @@
 
 ## Key notes
 
-- **Reconnect token in `localStorage`** so a refresh or lock screen doesn't lose your seat. On load, if a token exists for this room, send it with `join`.
+- **Reconnect token in `localStorage`** so a refresh or lock screen doesn't lose your seat. It's saved with a timestamp, ignored after 12 hours, and only the latest room's token is kept. After a refresh the page asks "Continue as <name>?" (with "Not me") before rejoining, because phones get passed around at parties. A lock screen reconnects without asking, since the page never reloaded.
+- **Revealed secrets are covered again** when the page is hidden (phone locked or put away) or the connection drops.
+- **Names:** control and invisible formatting characters (zero-width, direction overrides) are removed, and the name is NFKC-normalised, before sending. The host enforces its own rules too.
 - **Mobile-first**: big buttons, one action per screen, works in portrait, no zoom-on-focus.
 - Show a clear banner on `host.disconnected` and keep retrying.
 - Screens are driven by `type` only; adding a new game should need zero changes here.
