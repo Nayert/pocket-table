@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:platform_core/platform_core.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:transport/transport.dart';
 
 import '../host_controller.dart';
 
+/// Room code + QR, live player list, game picker and settings, Start.
+/// Only reads state and calls controller actions.
 class LobbyScreen extends StatelessWidget {
   const LobbyScreen({super.key, required this.controller});
   final HostController controller;
@@ -27,7 +30,7 @@ class LobbyScreen extends StatelessWidget {
   }
 
   void _start(BuildContext context) {
-    final error = p.startGame();
+    final error = controller.startGame();
     if (error != null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
     }
@@ -38,72 +41,142 @@ class LobbyScreen extends StatelessWidget {
     final info = p.joinInfo!;
     final theme = Theme.of(context);
     final game = p.selectedGame;
+    final connected = p.connectedPlayers.length;
+    final problem = controller.startProblem;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Lobby · ${info.mode}'),
-        leading: IconButton(icon: const Icon(Icons.close), onPressed: () => _confirmStop(context)),
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _confirmStop(context);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(info.mode == 'Online' ? 'Lobby · Online' : 'Lobby · Same Wi-Fi'),
+          leading: IconButton(
+            tooltip: 'Close the room',
+            icon: const Icon(Icons.close),
+            onPressed: () => _confirmStop(context),
+          ),
+        ),
+        body: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 640),
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  StatusBanner(status: p.transportStatus, warning: info.warning),
+                  _JoinCard(info: info),
+                  const SizedBox(height: 20),
+                  Row(children: [
+                    Expanded(child: Text('Players', style: theme.textTheme.titleLarge)),
+                    Text('$connected connected${p.players.length > connected ? ' · ${p.players.length - connected} offline' : ''}'),
+                  ]),
+                  const SizedBox(height: 4),
+                  if (p.players.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Text('Waiting for players to scan the code…'),
+                    ),
+                  for (final pl in p.players)
+                    PlayerTile(
+                      name: pl.name,
+                      connected: pl.connected,
+                      onKick: () => confirmKick(context, controller, pl.id, pl.name),
+                    ),
+                  const Divider(height: 32),
+                  Text('Game', style: theme.textTheme.titleLarge),
+                  const SizedBox(height: 8),
+                  SegmentedButton<String>(
+                    segments: [
+                      for (final g in p.catalog) ButtonSegment(value: g.id, label: Text(g.displayName)),
+                    ],
+                    selected: {if (p.selectedGameId != null) p.selectedGameId!},
+                    onSelectionChanged: (s) => controller.selectGame(s.first),
+                  ),
+                  if (game != null) ...[
+                    const SizedBox(height: 10),
+                    Text(game.description),
+                    Text('${game.minPlayers}–${game.maxPlayers} players', style: theme.textTheme.bodySmall),
+                    const SizedBox(height: 8),
+                    for (final s in game.settings) _SettingRow(controller: controller, setting: s),
+                  ],
+                  const SizedBox(height: 24),
+                  FilledButton.icon(
+                    onPressed: problem == null ? () => _start(context) : null,
+                    icon: const Icon(Icons.play_arrow),
+                    label: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Text('Start ${game?.displayName ?? 'game'}', style: const TextStyle(fontSize: 18)),
+                    ),
+                  ),
+                  if (problem != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(problem, textAlign: TextAlign.center, style: theme.textTheme.bodyMedium),
+                    ),
+                  const SizedBox(height: 24),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
+    );
+  }
+}
+
+/// Big room code, QR code and the join link.
+class _JoinCard extends StatelessWidget {
+  const _JoinCard({required this.info});
+  final JoinInfo info;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final width = MediaQuery.sizeOf(context).width;
+    final qrSize = (width - 96).clamp(160.0, 280.0);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
           children: [
-            _StatusBanner(status: p.transportStatus, warning: info.warning),
-            Center(
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
-                child: QrImageView(data: info.url, size: 220, backgroundColor: Colors.white),
+            Text('Room code', style: theme.textTheme.titleMedium),
+            Semantics(
+              label: 'Room code ${info.roomCode.split('').join(' ')}',
+              excludeSemantics: true,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  info.roomCode,
+                  style: theme.textTheme.displayLarge?.copyWith(letterSpacing: 10, fontWeight: FontWeight.w800),
+                ),
               ),
             ),
             const SizedBox(height: 12),
-            Text('Room ${info.roomCode}',
-                style: theme.textTheme.headlineMedium?.copyWith(letterSpacing: 4, fontWeight: FontWeight.bold),
-                textAlign: TextAlign.center),
-            SelectableText(info.url, textAlign: TextAlign.center, style: theme.textTheme.bodySmall),
-            const SizedBox(height: 20),
-            Text('Players (${p.players.length})', style: theme.textTheme.titleMedium),
-            if (p.players.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Text('Waiting for players to scan the code…'),
+            Semantics(
+              label: 'QR code to join the room',
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
+                child: QrImageView(data: info.url, size: qrSize, backgroundColor: Colors.white),
               ),
-            for (final pl in p.players)
-              ListTile(
-                leading: Icon(pl.connected ? Icons.person : Icons.person_off),
-                title: Text(pl.name),
-                subtitle: pl.connected ? null : const Text('offline'),
-                trailing: IconButton(
-                  tooltip: 'Remove',
-                  icon: const Icon(Icons.remove_circle_outline),
-                  onPressed: () => p.kick(pl.id),
-                ),
-              ),
-            const Divider(height: 32),
-            Text('Game', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                for (final g in p.catalog)
-                  ChoiceChip(
-                    label: Text(g.displayName),
-                    selected: g.id == p.selectedGameId,
-                    onSelected: (_) => p.selectGame(g.id),
-                  ),
-              ],
             ),
-            if (game != null) ...[
-              const SizedBox(height: 8),
-              Text('${game.description}  (${game.minPlayers}–${game.maxPlayers} players)'),
-              const SizedBox(height: 8),
-              for (final s in game.settings) _SettingRow(platform: p, setting: s),
-            ],
-            const SizedBox(height: 24),
-            FilledButton.icon(
-              onPressed: () => _start(context),
-              icon: const Icon(Icons.play_arrow),
-              label: const Padding(padding: EdgeInsets.all(12), child: Text('Start game')),
+            const SizedBox(height: 12),
+            Text('Scan, or open this link and enter the code:', style: theme.textTheme.bodySmall),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(child: SelectableText(info.url, textAlign: TextAlign.center)),
+                IconButton(
+                  tooltip: 'Copy link',
+                  icon: const Icon(Icons.copy, size: 20),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: info.url));
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Link copied')));
+                  },
+                ),
+              ],
             ),
           ],
         ),
@@ -112,43 +185,96 @@ class LobbyScreen extends StatelessWidget {
   }
 }
 
-class _StatusBanner extends StatelessWidget {
-  const _StatusBanner({required this.status, this.warning});
+/// One player row with a status word (not just an icon or colour) and kick.
+class PlayerTile extends StatelessWidget {
+  const PlayerTile({super.key, required this.name, required this.connected, required this.onKick, this.trailing});
+  final String name;
+  final bool connected;
+  final VoidCallback onKick;
+  final String? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(connected ? Icons.person : Icons.person_off_outlined),
+      title: Text(name, style: const TextStyle(fontSize: 18)),
+      subtitle: Text([connected ? 'connected' : 'offline', if (trailing != null) trailing!].join(' · ')),
+      trailing: IconButton(
+        tooltip: 'Remove $name',
+        icon: const Icon(Icons.person_remove_outlined),
+        onPressed: onKick,
+      ),
+    );
+  }
+}
+
+Future<void> confirmKick(BuildContext context, HostController controller, String id, String name) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text('Remove $name?'),
+      content: const Text("They'll be disconnected and can't rejoin this game."),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Remove')),
+      ],
+    ),
+  );
+  if (ok == true) controller.kick(id);
+}
+
+/// Shows relay trouble or a transport warning (e.g. no Wi-Fi found).
+class StatusBanner extends StatelessWidget {
+  const StatusBanner({super.key, required this.status, this.warning});
   final TransportStatus status;
   final String? warning;
 
   @override
   Widget build(BuildContext context) {
     final text = switch (status) {
-      TransportStatus.reconnecting => 'Lost connection to the relay. Reconnecting…',
-      TransportStatus.failed => 'The connection failed. Close the room and try again.',
+      TransportStatus.reconnecting => 'Lost connection to the server. Reconnecting… Players keep their seats.',
+      TransportStatus.failed => 'The connection failed. Close the room and start again.',
       _ => warning,
     };
     if (text == null) return const SizedBox.shrink();
-    return Card(
-      color: Theme.of(context).colorScheme.errorContainer,
-      child: Padding(padding: const EdgeInsets.all(12), child: Text(text)),
+    final scheme = Theme.of(context).colorScheme;
+    return Semantics(
+      liveRegion: true,
+      child: Card(
+        color: scheme.errorContainer,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(children: [
+            Icon(Icons.warning_amber_rounded, color: scheme.onErrorContainer),
+            const SizedBox(width: 10),
+            Expanded(child: Text(text, style: TextStyle(color: scheme.onErrorContainer))),
+          ]),
+        ),
+      ),
     );
   }
 }
 
 class _SettingRow extends StatelessWidget {
-  const _SettingRow({required this.platform, required this.setting});
-  final Platform platform;
+  const _SettingRow({required this.controller, required this.setting});
+  final HostController controller;
   final GameSetting setting;
 
   @override
   Widget build(BuildContext context) {
-    final value = platform.gameSettings[platform.selectedGameId]![setting.key] ?? setting.defaultValue;
+    final value = controller.settingValue(setting);
     if (setting.isBool) {
       return SwitchListTile(
         contentPadding: EdgeInsets.zero,
         title: Text(setting.label),
         value: value as bool,
-        onChanged: (v) => platform.setSetting(setting.key, v),
+        onChanged: (v) => controller.setSetting(setting.key, v),
       );
     }
     final n = value as int;
+    final down = controller.steppedValue(setting, -1);
+    final up = controller.steppedValue(setting, 1);
     return ListTile(
       contentPadding: EdgeInsets.zero,
       title: Text(setting.label),
@@ -156,13 +282,18 @@ class _SettingRow extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           IconButton(
+            tooltip: 'Less',
             icon: const Icon(Icons.remove),
-            onPressed: n - setting.step >= setting.min ? () => platform.setSetting(setting.key, n - setting.step) : null,
+            onPressed: down == null ? null : () => controller.setSetting(setting.key, down),
           ),
-          SizedBox(width: 56, child: Text('$n', textAlign: TextAlign.center)),
+          SizedBox(
+            width: 60,
+            child: Text('$n', textAlign: TextAlign.center, style: const TextStyle(fontSize: 18)),
+          ),
           IconButton(
+            tooltip: 'More',
             icon: const Icon(Icons.add),
-            onPressed: n + setting.step <= setting.max ? () => platform.setSetting(setting.key, n + setting.step) : null,
+            onPressed: up == null ? null : () => controller.setSetting(setting.key, up),
           ),
         ],
       ),

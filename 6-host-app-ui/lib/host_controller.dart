@@ -8,63 +8,160 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:transport/transport.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+/// What the mode-select screen is waiting on while starting to host.
+enum HostStage { idle, waking, connecting }
+
 /// Bridges the pure-Dart platform core to Flutter widgets.
+///
+/// Screens only read state from here (and from [platform]'s fields) and call
+/// the action methods below. All decisions live here or in the platform core.
 class HostController extends ChangeNotifier {
-  HostController() {
-    _sub = platform.changes.listen((_) => notifyListeners());
-    _loadRelayUrl();
+  HostController({Platform? platform, bool useDeviceServices = true})
+      : platform = platform ?? Platform(games: allGames),
+        _device = useDeviceServices {
+    _sub = this.platform.changes.listen((_) => notifyListeners());
+    if (_device) _loadRelayUrl();
   }
 
-  final Platform platform = Platform(games: allGames);
-  late final StreamSubscription<void> _sub;
-
-  bool busy = false;
-  String? error;
-  String relayUrl = '';
-
+  /// The relay this project deploys to. Used until the host saves another.
+  static const defaultRelayUrl = 'https://pocket-table-relay.onrender.com';
   static const _relayKey = 'relayUrl';
 
+  final Platform platform;
+  final bool _device; // false in widget tests: no prefs, wakelock or assets
+  late final StreamSubscription<void> _sub;
+
+  HostStage stage = HostStage.idle;
+  bool get busy => stage != HostStage.idle;
+  String? error;
+  String relayUrl = defaultRelayUrl;
+
+  /// When waking the relay started, for the "waking server… 23s" label.
+  DateTime? wakeStartedAt;
+  Timer? _wakeTicker;
+  int _attempt = 0; // bumps on cancel so a late result is ignored
+
   Future<void> _loadRelayUrl() async {
-    final prefs = await SharedPreferences.getInstance();
-    relayUrl = prefs.getString(_relayKey) ?? '';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString(_relayKey);
+      if (saved != null && saved.trim().isNotEmpty) relayUrl = saved;
+    } catch (_) {/* first run or no storage: keep the default */}
     notifyListeners();
   }
+
+  // ------------------------------------------------------------ hosting
 
   Future<void> hostLocal() => _host(() => LocalTransport(loadAsset: _loadPlayerAsset));
 
   Future<void> hostOnline(String url) async {
-    relayUrl = url.trim();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_relayKey, relayUrl);
-    if (relayUrl.isEmpty) {
+    final u = url.trim();
+    if (u.isEmpty) {
       error = 'Enter the relay server address first.';
       notifyListeners();
       return;
     }
+    relayUrl = u;
+    if (_device) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_relayKey, relayUrl);
+      } catch (_) {/* not fatal */}
+    }
+
+    final attempt = ++_attempt;
+    error = null;
+    stage = HostStage.waking;
+    wakeStartedAt = DateTime.now();
+    _wakeTicker?.cancel();
+    _wakeTicker = Timer.periodic(const Duration(seconds: 1), (_) => notifyListeners());
+    notifyListeners();
+    try {
+      // Free hosting sleeps when idle; the first request can take ~a minute.
+      await OnlineTransport.wakeRelay(relayUrl);
+    } on TimeoutException {
+      if (attempt != _attempt) return;
+      _stopWaking();
+      error = "The server didn't answer within 100 seconds. Check the address and your internet, then try again.";
+      notifyListeners();
+      return;
+    } catch (e) {
+      if (attempt != _attempt) return;
+      _stopWaking();
+      error = 'Could not reach the server: $e';
+      notifyListeners();
+      return;
+    }
+    if (attempt != _attempt) return; // cancelled while waking
+    _stopWaking();
     await _host(() => OnlineTransport(relayUrl: relayUrl, maxPlayers: platform.maxPlayers));
   }
 
+  /// Give up waiting for the relay to wake.
+  void cancelHosting() {
+    if (stage != HostStage.waking) return;
+    _attempt++;
+    _stopWaking();
+    notifyListeners();
+  }
+
+  void _stopWaking() {
+    _wakeTicker?.cancel();
+    _wakeTicker = null;
+    wakeStartedAt = null;
+    stage = HostStage.idle;
+  }
+
+  int get wakeSeconds => wakeStartedAt == null ? 0 : DateTime.now().difference(wakeStartedAt!).inSeconds;
+
   Future<void> _host(Transport Function() make) async {
-    busy = true;
+    stage = HostStage.connecting;
     error = null;
     notifyListeners();
     try {
       await platform.host(make());
-      await WakelockPlus.enable(); // keep the screen on while hosting
+      if (_device) await WakelockPlus.enable(); // keep the screen on while hosting
     } catch (e) {
       await platform.shutdown();
       error = 'Could not start: $e';
     } finally {
-      busy = false;
+      stage = HostStage.idle;
       notifyListeners();
     }
   }
 
   Future<void> stopHosting() async {
     await platform.shutdown();
-    await WakelockPlus.disable();
+    if (_device) await WakelockPlus.disable();
     notifyListeners();
   }
+
+  // ------------------------------------------------------------ lobby
+
+  /// Null when the host can press Start, otherwise why not (shown under the button).
+  String? get startProblem => platform.startProblem;
+  bool get canStart => startProblem == null;
+
+  void selectGame(String id) => platform.selectGame(id);
+  void setSetting(String key, Object value) => platform.setSetting(key, value);
+  Object settingValue(GameSetting s) =>
+      platform.gameSettings[platform.selectedGameId]?[s.key] ?? s.defaultValue;
+
+  /// The value [s] would have after one step up (+1) or down (-1), or null
+  /// if that's outside its allowed range.
+  int? steppedValue(GameSetting s, int direction) {
+    final v = settingValue(s);
+    if (v is! int) return null;
+    final next = v + direction * s.step;
+    return next < s.min || next > s.max ? null : next;
+  }
+
+  /// Returns an error message, or null when the game started.
+  String? startGame() => platform.startGame();
+  void endGame() => platform.endGame();
+  void kick(String playerId) => platform.kick(playerId);
+
+  // ------------------------------------------------------------ assets
 
   /// Serves files of the player page from app assets (Local mode).
   static Future<List<int>?> _loadPlayerAsset(String path) async {
@@ -78,6 +175,7 @@ class HostController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _wakeTicker?.cancel();
     _sub.cancel();
     platform.shutdown();
     super.dispose();

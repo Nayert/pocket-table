@@ -26,7 +26,7 @@ class _HostAppState extends State<HostApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Party Games Host',
+      title: 'Pocket Table Host',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF5B8CFF), brightness: Brightness.dark),

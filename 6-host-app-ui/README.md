@@ -28,9 +28,25 @@
 - No game rules and no validation — it only displays state and forwards the host's choices.
 - If the host is also playing, their private info still goes through their own player client, not this screen (everyone can see the host phone).
 
+## Screens
+
+- **Mode select:** Same Wi-Fi or Online. Online uses `https://pocket-table-relay.onrender.com` unless you change it (the last address is saved). The free relay sleeps when idle, so the app first polls `/health` and shows **"Waking server… Ns"** with a Cancel button. Waking can take up to a minute, and the app gives up after 100 s.
+- **Lobby:** the room code in big letters, a QR code, and the join link with a copy button. Players are listed as connected or offline, each with a remove button that asks first. Below that are the game picker (Mafia / Poker), the game's settings, and Start. Start is disabled until the player count is valid, and the reason is shown underneath (`Platform.startProblem`).
+- **Table:** draws only `publicState()`, so it can't show roles or hole cards. Whose turn it is gets highlighted with an arrow and the word "turn", not just a colour. There's a big countdown, a "What happened" log, a Players sheet with remove buttons, and an End button that asks first.
+
+All logic lives in `host_controller.dart` and the platform core. Screens only read state and call controller actions.
+
+## Tests
+
+```bash
+flutter test        # widget tests with FakeTransport: no network, no device
+```
+
+They cover the default relay, the waking state, Start being disabled with too few players, and that the table view shows no hole cards and no role names.
+
 ## Key notes
 
-- **Wakelock** to keep the screen on while hosting.
+- **Wakelock** to keep the screen on while hosting (via `wakelock_plus`).
 - **Local network permission** on iPhone for Local mode.
 - Big, readable text on the table view; it's meant to be seen from across a room.
 - Option to **cast to a TV** later — keep the table view a separate widget so it can be shown on another display.
