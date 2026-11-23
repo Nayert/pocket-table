@@ -56,6 +56,58 @@ class OnlineTransport implements Transport {
     return '$u/ws/host';
   }
 
+  /// "https://x.onrender.com/" -> "https://x.onrender.com/health" (ws/wss become http/https).
+  static Uri healthUri(String relayUrl) {
+    var u = relayUrl.trim();
+    while (u.endsWith('/')) {
+      u = u.substring(0, u.length - 1);
+    }
+    if (u.startsWith('wss://')) {
+      u = 'https://${u.substring(6)}';
+    } else if (u.startsWith('ws://')) {
+      u = 'http://${u.substring(5)}';
+    } else if (!u.startsWith('http://') && !u.startsWith('https://')) {
+      u = 'https://$u';
+    }
+    return Uri.parse('$u/health');
+  }
+
+  /// Free cloud hosts put the relay to sleep when idle, and the first request
+  /// can take about a minute while it wakes. Polls `/health` until the relay
+  /// answers `{"ok": true}`; throws a [TimeoutException] after [timeout].
+  /// Call this before [start], whose own timeouts are short.
+  static Future<void> wakeRelay(
+    String relayUrl, {
+    Duration timeout = const Duration(seconds: 100),
+    Duration retryEvery = const Duration(seconds: 3),
+  }) async {
+    final uri = healthUri(relayUrl);
+    final giveUpAt = DateTime.now().add(timeout);
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    try {
+      while (true) {
+        final left = giveUpAt.difference(DateTime.now());
+        if (left <= Duration.zero) throw TimeoutException('The relay server did not wake up', timeout);
+        try {
+          final req = await client.getUrl(uri).timeout(left);
+          final res = await req.close().timeout(left);
+          final body = await res.transform(utf8.decoder).join().timeout(left);
+          if (res.statusCode == 200) {
+            final json = jsonDecode(body);
+            if (json is Map && json['ok'] == true) return;
+          }
+        } on TimeoutException {
+          rethrow;
+        } catch (_) {
+          // Not up yet (connection refused, 502 from the host's proxy, bad JSON...): try again.
+        }
+        await Future<void>.delayed(retryEvery);
+      }
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   void _setStatus(TransportStatus s) {
     _status = s;
     _statusCtl.add(s);

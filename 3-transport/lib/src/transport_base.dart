@@ -44,7 +44,7 @@ abstract class Transport {
   Future<JoinInfo> start();
   Future<void> stop();
 
-  /// Send to one connection. Use this for anything private (roles, cards).
+  /// Send to one connection. Use this for anything meant for one player only.
   void sendTo(String connId, Map<String, dynamic> message);
 
   /// Send to every connection. Never use this for private information.
