@@ -37,6 +37,11 @@
 - **Mobile-first**: big buttons, one action per screen, works in portrait, no zoom-on-focus.
 - Show a clear banner on `host.disconnected` and keep retrying.
 - Screens are driven by `type` only; adding a new game should need zero changes here.
+- **Connection states:** a status label (Connecting / Connected / Reconnecting / Host away) and a banner for anything that needs attention. Reconnects back off from 1s to 10s with jitter, retry immediately when the page becomes visible or the phone comes back online, and offer "Retry now" after a few failures.
+- **Closed screen** for `room.closed` (host left, kicked, expired) and for a saved seat whose room no longer exists.
+- **Secrets:** on screens with `secret: true`, the body and cards start hidden behind "Tap to reveal" / "Hide" (title and lines stay visible). The reveal lasts while the same secret stays on screen and hides again on any change.
+- **Amounts:** options with `input` get a slider, a number box and Min / Half / Max buttons, all snapped to `min`/`max`/`step`; an illegal amount can't be sent. A half-entered amount survives a refresh of the same screen (another player acting).
+- **Accessibility:** WCAG AA contrast, 44px+ tap targets, screen titles announced through an `aria-live` region, selections marked with ✓ and `aria-pressed`, cards labelled ("Ace of spades"), and nothing shown by colour alone.
 
 ## Files
 

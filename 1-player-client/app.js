@@ -1,19 +1,30 @@
 // Connection, joining, reconnecting and message dispatch.
 // The same page works in Local mode (served by the host phone) and Online
 // mode (served by the relay): it always connects back to wherever it came from.
+// No game rules live here: we only render what the host sends and send taps back.
 "use strict";
 
 const PROTOCOL_VERSION = 1;
+const CODE_LENGTH = 4;
+const NAME_MAX = 16;
+const CONNECT_TIMEOUT_MS = 10000;
+const RETRY_MAX_MS = 10000;
+const SHOW_RETRY_AFTER = 4; // failed attempts before offering "Retry now"
+
+// Every join.error reason in shared-protocol/README.md
 const JOIN_ERRORS = {
-  room_not_found: "No room with that code.",
-  room_full: "That room is full.",
-  name_taken: "Someone already has that name.",
-  version_mismatch: "This page doesn't match the host's app version. Refresh, or update the host app.",
-  game_in_progress: "A game has already started. Wait for the next one.",
-  bad_name: "Pick a name (1–16 characters).",
+  room_not_found: "No room with that code. Check the code on the host's screen.",
+  room_full: "That room is full. Ask the host to make space.",
+  name_taken: "Someone in this room already has that name. Try another.",
+  bad_name: `Pick a name between 1 and ${NAME_MAX} characters.`,
+  version_mismatch: "This page doesn't match the host's app version. Refresh this page, or ask the host to update their app.",
+  game_in_progress: "A game is already running. You can join when it's back in the lobby.",
 };
-// Errors where retrying won't help
-const FATAL = new Set(Object.keys(JOIN_ERRORS));
+const CLOSED_REASONS = {
+  host_left: "The host closed the room.",
+  kicked: "The host removed you from the room.",
+  expired: "The room expired because the host was gone too long.",
+};
 
 const $ = (id) => document.getElementById(id);
 
@@ -22,11 +33,14 @@ const state = {
   name: "",
   ws: null,
   playerId: null,
-  joined: false,
+  joined: false,     // host has accepted us (join.ok)
+  wantSeat: false,   // we should keep trying to (re)connect
   inGame: false,
+  hostAway: false,
   lobby: null,
-  retryDelay: 1000,
+  failures: 0,
   retryTimer: null,
+  connectTimer: null,
 };
 
 // ---- localStorage (wrapped: private browsing can throw) ----
@@ -37,44 +51,100 @@ const store = {
 };
 const tokenKey = (room) => "pg.token." + room;
 
+// ---- input cleaning (mirrors the host's rules so errors show before sending) ----
+function cleanCode(raw) {
+  return String(raw || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, CODE_LENGTH);
+}
+function cleanName(raw) {
+  // eslint-disable-next-line no-control-regex
+  return String(raw || "").replace(/[\x00-\x1F\x7F]/g, "").trim();
+}
+
 // ---- views ----
+function showOnly(id) {
+  for (const v of ["join-view", "closed-view", "game-view"]) $(v).classList.toggle("hidden", v !== id);
+  const inRoom = id === "game-view";
+  $("leave-btn").classList.toggle("hidden", !inRoom);
+  $("room-label").textContent = inRoom ? "Room " + state.room : "";
+  if (!inRoom) setConn(null);
+}
+
 function showJoin(error) {
-  $("join-view").classList.remove("hidden");
-  $("game-view").classList.add("hidden");
-  $("leave-btn").classList.add("hidden");
-  $("room-label").textContent = "";
+  showOnly("join-view");
   $("join-btn").disabled = false;
+  $("join-btn").textContent = "Join";
   $("join-error").textContent = error || "";
+  if (state.room) $("room-input").value = state.room;
+}
+
+function showClosed(text) {
+  showOnly("closed-view");
+  $("closed-text").textContent = text;
+  $("closed-btn").focus();
 }
 
 function showGameView() {
-  $("join-view").classList.add("hidden");
-  $("game-view").classList.remove("hidden");
-  $("leave-btn").classList.remove("hidden");
-  $("room-label").textContent = "Room " + state.room;
+  if ($("game-view").classList.contains("hidden")) showOnly("game-view");
 }
 
-function banner(text) {
-  const b = $("banner");
-  b.textContent = text || "";
-  b.classList.toggle("hidden", !text);
+function announce(text) {
+  const a = $("announce");
+  a.textContent = "";
+  // a fresh text node after a tick makes screen readers re-read it
+  setTimeout(() => { a.textContent = text || ""; }, 30);
 }
+
+// Banner + small status label. `kind` is one of: null, "connecting",
+// "connected", "reconnecting", "host_away". Each state has its own text,
+// so nothing depends on colour alone.
+function setConn(kind, detail) {
+  const label = $("conn-label");
+  const LABELS = { connecting: "Connecting…", connected: "● Connected", reconnecting: "Reconnecting…", host_away: "Host away" };
+  label.textContent = LABELS[kind] || "";
+  label.className = "conn-label" + (kind ? " " + kind : " hidden");
+
+  let text = "";
+  if (kind === "connecting" && state.joined) text = "Connecting…";
+  if (kind === "reconnecting") text = detail || "Connection lost. Reconnecting…";
+  if (kind === "host_away") text = "The host lost connection. Waiting for them to come back…";
+  const b = $("banner");
+  $("banner-text").textContent = text;
+  b.classList.toggle("hidden", !text);
+  b.classList.toggle("warn", kind === "host_away");
+  $("banner-retry").classList.toggle("hidden", !(kind === "reconnecting" && state.failures >= SHOW_RETRY_AFTER));
+}
+
+function toast(text) { Screens.toast(text); }
 
 // ---- connection ----
 function send(type, payload) {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type, to: "host", payload: payload || {} }));
+    return true;
   }
+  return false;
 }
 
 function connect() {
   clearTimeout(state.retryTimer);
+  clearTimeout(state.connectTimer);
+  if (state.ws) { const old = state.ws; state.ws = null; try { old.close(); } catch { /* ignore */ } }
+
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws/player?room=${encodeURIComponent(state.room)}`;
-  const ws = new WebSocket(url);
+  let ws;
+  try { ws = new WebSocket(url); } catch { return onDrop(); }
   state.ws = ws;
+  setConn(state.joined ? "reconnecting" : "connecting");
+
+  // A socket stuck "connecting" (e.g. a sleeping server) counts as a failure.
+  state.connectTimer = setTimeout(() => {
+    if (state.ws === ws && ws.readyState !== WebSocket.OPEN) { try { ws.close(); } catch { /* ignore */ } onDrop(ws); }
+  }, CONNECT_TIMEOUT_MS);
 
   ws.onopen = () => {
+    if (state.ws !== ws) return;
+    clearTimeout(state.connectTimer);
     send("join", {
       v: PROTOCOL_VERSION,
       room: state.room,
@@ -84,107 +154,171 @@ function connect() {
   };
 
   ws.onmessage = (ev) => {
+    if (state.ws !== ws) return;
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    handle(msg.type, msg.payload || {});
+    if (!msg || typeof msg.type !== "string") return;
+    handle(msg.type, (msg.payload && typeof msg.payload === "object") ? msg.payload : {});
   };
 
-  ws.onclose = () => {
-    if (state.ws !== ws) return;
-    if (!state.joined) {
-      // never got in: let them fix the code/name
-      if (!$("join-error").textContent) showJoin("Couldn't connect. Check the code and your Wi-Fi.");
-      return;
-    }
-    banner("Connection lost. Reconnecting…");
-    state.retryTimer = setTimeout(connect, state.retryDelay);
-    state.retryDelay = Math.min(state.retryDelay * 2, 10000);
-  };
+  ws.onclose = () => onDrop(ws);
+}
+
+function onDrop(ws) {
+  if (ws && state.ws !== ws) return; // an old socket we already replaced
+  clearTimeout(state.connectTimer);
+  state.ws = null;
+  if (!state.wantSeat) return;
+
+  if (!state.joined && !store.get(tokenKey(state.room))) {
+    // First attempt, never got in: let them fix the code or their network.
+    state.wantSeat = false;
+    showJoin(navigator.onLine === false
+      ? "You're offline. Check your Wi-Fi or data."
+      : "Couldn't reach the room. Check the code and your connection, then try again.");
+    return;
+  }
+  state.failures += 1;
+  const delay = Math.min(1000 * 2 ** Math.min(state.failures - 1, 4), RETRY_MAX_MS) + Math.random() * 400;
+  const offline = navigator.onLine === false;
+  setConn("reconnecting", offline
+    ? "You're offline. We'll reconnect when your connection is back."
+    : `Connection lost. Reconnecting… (attempt ${state.failures})`);
+  if (!state.joined) showWaitingSeat();
+  state.retryTimer = setTimeout(connect, delay);
+}
+
+// While rejoining a saved seat, show something better than an empty page.
+function showWaitingSeat() {
+  showGameView();
+  const view = $("game-view");
+  if (!view.childElementCount) {
+    Screens.render(view, "screen.waiting", { title: "Rejoining…", body: "Getting your seat back." }, () => {});
+  }
+}
+
+function retryNow() {
+  state.failures = Math.max(0, SHOW_RETRY_AFTER - 1);
+  connect();
 }
 
 // Close without triggering the reconnect logic in onclose.
 function closeSocket() {
   clearTimeout(state.retryTimer);
+  clearTimeout(state.connectTimer);
+  state.wantSeat = false;
   const ws = state.ws;
   state.ws = null;
-  if (ws) ws.close();
+  if (ws) { try { ws.close(); } catch { /* ignore */ } }
+}
+
+function resetSeat() {
+  state.joined = false;
+  state.inGame = false;
+  state.hostAway = false;
+  state.playerId = null;
+  state.lobby = null;
+  state.failures = 0;
+  Screens.reset();
+  $("game-view").replaceChildren();
 }
 
 function leave() {
+  if (state.inGame && !window.confirm("Leave the game? You'll lose your seat.")) return;
   send("leave");
   store.del(tokenKey(state.room));
   closeSocket();
-  state.joined = false;
-  state.inGame = false;
-  banner("");
+  resetSeat();
   showJoin();
 }
 
 // ---- incoming messages ----
 function sendAction(payload) {
-  send("action", payload);
+  if (!send("action", payload)) {
+    toast("Not connected. Your move wasn't sent. Try again once reconnected.");
+    return false;
+  }
+  return true;
+}
+
+function renderLobby() {
+  Screens.renderLobby($("game-view"), state.lobby || { players: [] }, state.playerId, state.hostAway);
 }
 
 function handle(type, p) {
   switch (type) {
     case "join.ok":
+      if (p.protocolVersion !== undefined && p.protocolVersion !== PROTOCOL_VERSION) {
+        handle("join.error", { reason: "version_mismatch" });
+        break;
+      }
       state.joined = true;
-      state.playerId = p.playerId;
-      state.retryDelay = 1000;
-      store.set(tokenKey(state.room), p.reconnectToken);
+      state.playerId = typeof p.playerId === "string" ? p.playerId : null;
+      state.failures = 0;
+      if (typeof p.reconnectToken === "string") store.set(tokenKey(state.room), p.reconnectToken);
       store.set("pg.name", state.name);
-      banner("");
+      setConn(state.hostAway ? "host_away" : "connected");
       showGameView();
-      if (!state.inGame) Screens.renderLobby($("game-view"), state.lobby || { players: [] }, state.playerId);
+      if (!state.inGame) { renderLobby(); announce("Joined room " + state.room); }
       break;
 
-    case "join.error":
-      state.joined = false;
-      if (p.reason === "room_not_found") store.del(tokenKey(state.room));
-      showJoin(JOIN_ERRORS[p.reason] || "Couldn't join: " + p.reason);
-      if (FATAL.has(p.reason)) closeSocket();
+    case "join.error": {
+      const reason = String(p.reason || "");
+      const msg = JOIN_ERRORS[reason] || "Couldn't join (" + reason + ").";
+      const hadSeat = state.joined || !!store.get(tokenKey(state.room));
+      store.del(tokenKey(state.room));
+      closeSocket();
+      resetSeat();
+      if (hadSeat && reason === "room_not_found") showClosed("This room doesn't exist any more. The host may have closed it.");
+      else showJoin(msg);
       break;
+    }
 
     case "lobby.update":
       state.lobby = p;
-      if (state.joined && !state.inGame) Screens.renderLobby($("game-view"), p, state.playerId);
+      if (state.joined && !state.inGame) renderLobby();
       break;
 
     case "game.started":
       state.inGame = true;
+      announce("Game started" + (p.name ? ": " + p.name : ""));
       break;
 
     case "game.ended":
       state.inGame = false;
-      if (state.joined) Screens.renderLobby($("game-view"), state.lobby || { players: [] }, state.playerId);
+      Screens.reset();
+      if (state.joined) { renderLobby(); announce("Back in the lobby"); }
       break;
 
     case "action.error":
-      Screens.toast(p.message || "That move isn't allowed.");
+      toast(String(p.message || "That move isn't allowed."));
       break;
 
     case "host.disconnected":
-      banner("The host lost connection. Waiting for them to come back…");
+      state.hostAway = true;
+      setConn("host_away");
+      if (state.joined && !state.inGame) renderLobby();
       break;
 
     case "host.reconnected":
-      banner("");
+      state.hostAway = false;
+      setConn(state.joined ? "connected" : null);
+      if (state.joined && !state.inGame) renderLobby();
       break;
 
     case "room.closed":
       store.del(tokenKey(state.room));
       closeSocket();
-      state.joined = false;
-      banner("");
-      showJoin(p.reason === "kicked" ? "The host removed you from the room."
-        : p.reason === "host_left" ? "The host closed the room." : "The room has closed.");
+      resetSeat();
+      showClosed(CLOSED_REASONS[p.reason] || "The room has closed.");
       break;
 
     default:
-      if (type && type.startsWith("screen.")) {
+      if (type.startsWith("screen.") && state.joined) {
         state.inGame = true;
         showGameView();
-        Screens.render($("game-view"), type, p, sendAction);
+        const changed = Screens.render($("game-view"), type, p, sendAction);
+        if (changed && p.title) announce(String(p.title));
       }
   }
 }
@@ -192,40 +326,77 @@ function handle(type, p) {
 // ---- start up ----
 function init() {
   const params = new URLSearchParams(location.search);
-  const room = (params.get("room") || "").toUpperCase();
+  const room = cleanCode(params.get("room"));
   const name = store.get("pg.name") || "";
-  $("room-input").value = room;
-  $("name-input").value = name;
+  const roomInput = $("room-input");
+  const nameInput = $("name-input");
+  roomInput.value = room;
+  nameInput.value = name;
+
+  roomInput.addEventListener("input", () => {
+    const pos = roomInput.selectionStart;
+    const clean = cleanCode(roomInput.value);
+    if (clean !== roomInput.value) {
+      roomInput.value = clean;
+      try { roomInput.setSelectionRange(pos, pos); } catch { /* ignore */ }
+    }
+    roomInput.removeAttribute("aria-invalid");
+    if (clean.length === CODE_LENGTH && !nameInput.value) nameInput.focus();
+  });
+  nameInput.addEventListener("input", () => nameInput.removeAttribute("aria-invalid"));
 
   $("join-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    state.room = $("room-input").value.trim().toUpperCase();
-    state.name = $("name-input").value.trim();
-    if (!state.room || !state.name) return;
+    const code = cleanCode(roomInput.value);
+    const nm = cleanName(nameInput.value);
+    if (code.length !== CODE_LENGTH) {
+      roomInput.setAttribute("aria-invalid", "true");
+      roomInput.focus();
+      $("join-error").textContent = `The room code has ${CODE_LENGTH} characters.`;
+      return;
+    }
+    if (!nm || nm.length > NAME_MAX) {
+      nameInput.setAttribute("aria-invalid", "true");
+      nameInput.focus();
+      $("join-error").textContent = JOIN_ERRORS.bad_name;
+      return;
+    }
+    if (state.room && state.room !== code) resetSeat();
+    state.room = code;
+    state.name = nm;
+    state.wantSeat = true;
+    state.failures = 0;
     $("join-btn").disabled = true;
+    $("join-btn").textContent = "Joining…";
     $("join-error").textContent = "";
     connect();
   });
 
   $("leave-btn").addEventListener("click", leave);
+  $("banner-retry").addEventListener("click", retryNow);
+  $("closed-btn").addEventListener("click", () => { state.room = ""; showJoin(); roomInput.value = ""; roomInput.focus(); });
 
   // Came back from a refresh or a locked screen with a saved seat: rejoin straight away.
   if (room && name && store.get(tokenKey(room))) {
     state.room = room;
-    state.name = name;
+    state.name = cleanName(name);
+    state.wantSeat = true;
+    showWaitingSeat();
     connect();
   } else if (room) {
-    $("name-input").focus();
+    nameInput.focus();
   }
 
   // Phones pause pages in the background; reconnect as soon as we're visible again.
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && state.joined &&
-        (!state.ws || state.ws.readyState > WebSocket.OPEN)) {
-      state.retryDelay = 1000;
+  const wake = () => {
+    if (state.wantSeat && (!state.ws || state.ws.readyState > WebSocket.OPEN)) {
+      state.failures = 0;
       connect();
     }
-  });
+  };
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") wake(); });
+  window.addEventListener("online", wake);
+  window.addEventListener("pageshow", (e) => { if (e.persisted) wake(); });
 }
 
 init();

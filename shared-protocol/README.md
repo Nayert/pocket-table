@@ -84,12 +84,14 @@ The relay sets `from` on every player message to that player's `connId`, so play
 
 Every screen payload can include `title`, `body`, `cards` (e.g. `["As","Td"]`, `"??"` = face down), `lines` (list of text), `secondsLeft` and `actionId`.
 
+A screen can also set `secret: true` (optional, added without a version bump). The page then hides `body` and `cards` behind a "Tap to reveal" button the player can toggle, so people nearby can't read a role or hole cards over their shoulder. `title` and `lines` stay visible, so put only public information (pot, whose turn) there. A reveal lasts while consecutive screens carry the same secret `body` and `cards`; anything else hides it again. Hosts that never send it get the old behaviour.
+
 | Type | Extra payload |
 |------|---------------|
 | `screen.waiting` | – |
 | `screen.private` | optional `options` (e.g. a "Ready" button) |
 | `screen.choice` | `options: [{ id, label, sub?, input?: { min, max, step, label?, default? } }]`, `min`, `max`, `submitLabel?` |
-| `screen.input` | `inputKind: "number" \| "text"`, `min?`, `max?`, `submitLabel?` |
+| `screen.input` | `inputKind: "number" \| "text"`, `min?`, `max?` (for text: max length), `step?`, `default?`, `submitLabel?` |
 | `screen.results` | optional `options` |
 
 An option with `input` (like poker's Raise) asks for a number before sending.
@@ -98,7 +100,7 @@ An option with `input` (like poker's Raise) asks for a number before sending.
 
 | Type | Payload |
 |------|---------|
-| `action` | `{ actionId, choice: [optionId], value? }` |
+| `action` | `{ actionId, choice: [optionId], value? }` (`choice` is `[]` for `screen.input`) |
 
 The host only accepts an action whose `actionId` matches the screen it last sent that player, whose option ids were on that screen, and whose `value` is in range.
 
