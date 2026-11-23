@@ -150,6 +150,7 @@ const Screens = (() => {
     const max = num(spec.max, Infinity);
     const step = num(spec.step, 1) > 0 ? num(spec.step, 1) : 1;
     if (!Number.isFinite(v)) return null;
+    if (v >= max) return Number.isFinite(max) ? max : Math.round(v); // max (all in) is always legal
     let x = Math.round(v);
     if (Number.isFinite(min)) x = min + Math.round((x - min) / step) * step;
     if (x > max) x = Number.isFinite(min) ? min + Math.floor((max - min) / step) * step : max;
