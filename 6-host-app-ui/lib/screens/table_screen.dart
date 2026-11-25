@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:platform_core/platform_core.dart';
 
 import '../host_controller.dart';
 import '../widgets/playing_card.dart';
@@ -56,6 +58,23 @@ class TableScreen extends StatelessWidget {
     );
   }
 
+  /// A host button: ask for the picks / number it needs, then send it.
+  Future<void> _pressControl(BuildContext context, HostControl hc) async {
+    var answer = (choice: const <String>[], value: null as int?);
+    if (hc.options.isNotEmpty || hc.input != null) {
+      final a = await showDialog<({List<String> choice, int? value})>(
+        context: context,
+        builder: (_) => HostControlDialog(control: hc),
+      );
+      if (a == null) return;
+      answer = a;
+    }
+    final error = controller.hostAction(hc.id, choice: answer.choice, value: answer.value);
+    if (error != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = controller.platform;
@@ -70,6 +89,7 @@ class TableScreen extends StatelessWidget {
     final rows = (s['rows'] as List?)?.cast<Map<String, dynamic>>() ?? const <Map<String, dynamic>>[];
     final log = (s['log'] as List?)?.cast<String>() ?? const <String>[];
     final offline = p.players.where((pl) => !pl.connected).length;
+    final controls = game.hostControls();
 
     return PopScope(
       canPop: false,
@@ -142,6 +162,26 @@ class TableScreen extends StatelessWidget {
                         spacing: 10,
                         runSpacing: 10,
                         children: [for (final c in cards) PlayingCard(code: c, width: 64)],
+                      ),
+                    ),
+                  if (controls.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 16),
+                      child: Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          for (final hc in controls)
+                            hc.primary
+                                ? FilledButton(
+                                    onPressed: () => _pressControl(context, hc),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 10),
+                                      child: Text(hc.label, style: const TextStyle(fontSize: 18)),
+                                    ),
+                                  )
+                                : OutlinedButton(onPressed: () => _pressControl(context, hc), child: Text(hc.label)),
+                        ],
                       ),
                     ),
                   const SizedBox(height: 12),
@@ -234,6 +274,135 @@ class _Countdown extends StatelessWidget {
               fontFeatures: const [FontFeature.tabularFigures()],
             )),
       ]),
+    );
+  }
+}
+
+/// Asks the host for what a [HostControl] needs: pick one (or, with
+/// multi, several) of its options and/or type a number.
+class HostControlDialog extends StatefulWidget {
+  const HostControlDialog({super.key, required this.control});
+  final HostControl control;
+
+  @override
+  State<HostControlDialog> createState() => _HostControlDialogState();
+}
+
+class _HostControlDialogState extends State<HostControlDialog> {
+  final Set<String> _picked = {};
+  final _amount = TextEditingController();
+  String? _error;
+
+  HostControl get hc => widget.control;
+
+  /// The number asked for: the control's own, or the picked option's.
+  OptionInput? get _input {
+    if (hc.input != null) return hc.input;
+    if (_picked.length != 1) return null;
+    return hc.options.where((o) => o.id == _picked.first).firstOrNull?.input;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _prefill();
+  }
+
+  void _prefill() {
+    final d = _input?.defaultValue ?? _input?.min;
+    _amount.text = d == null ? '' : '$d';
+  }
+
+  @override
+  void dispose() {
+    _amount.dispose();
+    super.dispose();
+  }
+
+  void _toggle(String id) {
+    final before = _input;
+    setState(() {
+      if (hc.multi) {
+        _picked.contains(id) ? _picked.remove(id) : _picked.add(id);
+      } else {
+        _picked
+          ..clear()
+          ..add(id);
+      }
+      _error = null;
+      if (_input != before) _prefill();
+    });
+  }
+
+  void _submit() {
+    if (hc.options.isNotEmpty && _picked.isEmpty) {
+      setState(() => _error = hc.multi ? 'Pick at least one.' : 'Pick one.');
+      return;
+    }
+    final input = _input;
+    int? value;
+    if (input != null) {
+      value = int.tryParse(_amount.text.trim());
+      if (value == null || value < input.min || value > input.max) {
+        setState(() => _error = 'Enter a number from ${input.min} to ${input.max}.');
+        return;
+      }
+    }
+    Navigator.pop(context, (choice: _picked.toList(), value: value));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final input = _input;
+    return AlertDialog(
+      title: Text(hc.label),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (hc.help != null) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(hc.help!)),
+            for (final o in hc.options)
+              hc.multi
+                  ? CheckboxListTile(
+                      value: _picked.contains(o.id),
+                      onChanged: (_) => _toggle(o.id),
+                      title: Text(o.label),
+                      subtitle: o.sub == null ? null : Text(o.sub!),
+                    )
+                  : ListTile(
+                      leading: Icon(_picked.contains(o.id) ? Icons.radio_button_checked : Icons.radio_button_off),
+                      selected: _picked.contains(o.id),
+                      onTap: () => _toggle(o.id),
+                      title: Text(o.label),
+                      subtitle: o.sub == null ? null : Text(o.sub!),
+                    ),
+            if (input != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: TextField(
+                  controller: _amount,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: InputDecoration(
+                    labelText: input.label ?? 'Amount',
+                    helperText: '${input.min} to ${input.max}',
+                  ),
+                  onSubmitted: (_) => _submit(),
+                ),
+              ),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        FilledButton(onPressed: _submit, child: const Text('OK')),
+      ],
     );
   }
 }

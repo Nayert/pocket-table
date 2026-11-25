@@ -190,6 +190,38 @@ class Platform implements GameContext {
     _notify();
   }
 
+  /// The host pressed one of the active game's [Game.hostControls].
+  /// Returns an error message, or null when it worked.
+  String? hostAction(String controlId, {List<String> choice = const [], Object? value}) {
+    final game = activeGame;
+    if (game == null) return 'No game is running.';
+    final control = game.hostControls().where((c) => c.id == controlId).firstOrNull;
+    if (control == null) return 'That button is out of date.';
+    if (control.options.isNotEmpty) {
+      final ids = {for (final o in control.options) o.id: o};
+      if (choice.isEmpty || (!control.multi && choice.length > 1) || choice.toSet().length != choice.length) {
+        return control.multi ? 'Pick at least one.' : 'Pick one.';
+      }
+      for (final c in choice) {
+        final opt = ids[c];
+        if (opt == null) return 'That choice isn\'t available.';
+        if (opt.input != null && !_inRange(value, opt.input!.min, opt.input!.max, opt.input!.step)) {
+          return 'Pick an amount from ${opt.input!.min} to ${opt.input!.max}.';
+        }
+      }
+    } else if (choice.isNotEmpty) {
+      return 'That button takes no choice.';
+    }
+    final input = control.input;
+    if (input != null && !_inRange(value, input.min, input.max, input.step)) {
+      return 'Pick an amount from ${input.min} to ${input.max}.';
+    }
+    final result = game.handleHostAction(PlayerAction(actionId: controlId, choice: choice, value: value));
+    if (!result.ok) return result.error;
+    requestUpdate();
+    return null;
+  }
+
   // ---------------------------------------------------------------- GameContext
 
   @override

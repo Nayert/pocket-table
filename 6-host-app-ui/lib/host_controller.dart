@@ -188,6 +188,10 @@ class HostController extends ChangeNotifier {
   void endGame() => platform.endGame();
   void kick(String playerId) => platform.kick(playerId);
 
+  /// Returns an error message, or null when it worked.
+  String? hostAction(String controlId, {List<String> choice = const [], Object? value}) =>
+      platform.hostAction(controlId, choice: choice, value: value);
+
   // ------------------------------------------------------------ assets
 
   /// Serves files of the player page from app assets (Local mode).

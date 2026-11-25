@@ -76,93 +76,33 @@ void main() {
     });
   });
 
-  group('poker game', () {
-    late PokerGame game;
-    late List<Player> players;
 
-    setUp(() {
-      players = [
-        for (final n in ['Ana', 'Ben', 'Cal'])
-          Player(id: n.toLowerCase(), name: n, reconnectToken: 't')
-      ];
-      game = PokerGame()..start(_Ctx(), players, {'startingChips': 1000, 'bigBlind': 20, 'turnSeconds': 0});
-    });
-    tearDown(() => game.dispose());
-
-    int totalChips() {
-      final rows = (game.publicState()['rows'] as List).cast<Map>();
-      final pot = int.parse(RegExp(r'Pot: (\d+)').firstMatch(game.publicState()['subtitle'] as String)!.group(1)!);
-      return pot + rows.map((r) => int.parse(RegExp(r'^(\d+) chips').firstMatch(r['value'] as String)!.group(1)!)).reduce((a, b) => a + b);
-    }
-
-    String whoseTurn() => players.firstWhere((p) => game.privateState(p.id).kind == ScreenKind.choice).id;
-
-    test('blinds are posted and exactly one player is asked to act', () {
-      expect(totalChips(), 3000);
-      expect(players.where((p) => game.privateState(p.id).kind == ScreenKind.choice).length, 1);
-    });
-
-    test('everyone folds to one player, chips are conserved', () {
-      final first = whoseTurn();
-      expect(game.handleAction(first, PlayerAction(actionId: game.privateState(first).actionId!, choice: ['fold'])).ok, isTrue);
-      final second = whoseTurn();
-      expect(game.handleAction(second, PlayerAction(actionId: game.privateState(second).actionId!, choice: ['fold'])).ok, isTrue);
-      expect(game.privateState(first).kind, ScreenKind.results);
-      expect(totalChips(), 3000);
-    });
-
-    test('acting out of turn is rejected', () {
-      final turn = whoseTurn();
-      final other = players.firstWhere((p) => p.id != turn).id;
-      final r = game.handleAction(other, PlayerAction(actionId: game.privateState(turn).actionId!, choice: ['fold']));
-      expect(r.ok, isFalse);
-    });
-
-    test('a raise below the minimum is rejected', () {
-      final turn = whoseTurn();
-      final id = game.privateState(turn).actionId!;
-      expect(game.handleAction(turn, PlayerAction(actionId: id, choice: ['raise'], value: 25)).ok, isFalse);
-      expect(game.handleAction(turn, PlayerAction(actionId: id, choice: ['raise'], value: 40)).ok, isTrue);
-    });
-
-    test('checking/calling every street reaches a showdown and conserves chips', () {
-      for (var i = 0; i < 40 && game.privateState(players.first.id).kind != ScreenKind.results; i++) {
-        final turn = whoseTurn();
-        final screen = game.privateState(turn);
-        final canCheck = screen.options.any((o) => o.id == 'check');
-        game.handleAction(turn, PlayerAction(actionId: screen.actionId!, choice: [canCheck ? 'check' : 'call']));
-      }
-      expect(game.privateState(players.first.id).kind, ScreenKind.results);
-      expect(totalChips(), 3000);
-      expect((game.publicState()['cards'] as List).length, 5);
-    });
-  });
-
-  // ---- same scenarios as prototype/test_prototypes.py (PokerBetting) ----
-  group('poker betting (mirrors PokerBetting in test_prototypes.py)', () {
+  // ---- the chip tracker: cards are dealt at the table, the app keeps the chips ----
+  group('poker chip tracker', () {
     late PokerGame g;
     late _Ctx ctx;
     late List<Player> ps;
 
-    /// Deck that deals these hole cards (seat order) and this board.
-    List<String> stackedDeck(List<List<String>> holes, List<String> board) {
-      final deal = [
-        for (final hc in holes) hc[0],
-        for (final hc in holes) hc[1],
-        'Xx', ...board.sublist(0, 3), 'Xx', board[3], 'Xx', board[4],
-      ];
-      return deal.reversed.toList();
+    ActionResult tryHost(String id, {List<String> choice = const [], Object? value}) =>
+        g.handleHostAction(PlayerAction(actionId: id, choice: choice, value: value));
+
+    void host(String id, {List<String> choice = const [], Object? value}) {
+      final r = tryHost(id, choice: choice, value: value);
+      if (!r.ok) throw StateError('host $id: ${r.error}');
     }
 
     void newGame(List<String> ids,
-        {int chips = 1000, int bb = 20, int? dealer, List<String>? deck, Map<String, int>? stacks, int seed = 1, int turnSeconds = 0}) {
+        {int buyIn = 1000, int bb = 20, int? dealer = 0, Map<String, int>? stacks, int seed = 1, int turnSeconds = 0, bool autoRebuy = false, bool deal = true}) {
       ps = [for (final i in ids) Player(id: i, name: i, reconnectToken: 't$i')];
       ctx = _Ctx(seed);
-      g = PokerGame(deckForTesting: deck, dealerForTesting: dealer, chipsForTesting: stacks)
-        ..start(ctx, ps, {'startingChips': chips, 'bigBlind': bb, 'turnSeconds': turnSeconds});
+      g = PokerGame(dealerForTesting: dealer, chipsForTesting: stacks)
+        ..start(ctx, ps, {'buyIn': buyIn, 'bigBlind': bb, 'turnSeconds': turnSeconds, 'autoRebuy': autoRebuy});
+      if (deal) host('next');
     }
 
     tearDown(() => g.dispose());
+
+    HostControl? control(String id) => g.hostControls().where((c) => c.id == id).firstOrNull;
 
     Screen? turnScreen() {
       for (final p in ps) {
@@ -194,133 +134,180 @@ void main() {
 
     Map<String, dynamic> row(String id) =>
         (g.publicState()['rows'] as List).cast<Map<String, dynamic>>()[ps.indexWhere((p) => p.id == id)];
-
-    int chipsOf(String id) => int.parse(RegExp(r'^(\d+) chips').firstMatch(row(id)['value'] as String)!.group(1)!);
-    int betOf(String id) => int.tryParse(RegExp(r'bet (\d+)').firstMatch(row(id)['value'] as String)?.group(1) ?? '') ?? 0;
-    bool folded(String id) => (row(id)['value'] as String).contains('folded');
-    int total() {
-      final pot = int.parse(RegExp(r'Pot: (\d+)').firstMatch(g.publicState()['subtitle'] as String)!.group(1)!);
-      return pot + [for (final p in ps) chipsOf(p.id)].reduce((a, b) => a + b);
+    String status(String id) => row(id)['value'] as String;
+    int chipsOf(String id) => int.parse(RegExp(r'^(\d+) chips').firstMatch(status(id))!.group(1)!);
+    int betOf(String id) => int.tryParse(RegExp(r'bet (\d+)').firstMatch(status(id))?.group(1) ?? '') ?? 0;
+    bool folded(String id) => status(id).contains('folded');
+    int pot() => int.parse(RegExp(r'Pot: (\d+)').firstMatch(g.publicState()['subtitle'] as String)!.group(1)!);
+    int total() => pot() + [for (final p in ps) chipsOf(p.id)].reduce((a, b) => a + b);
+    String title() => g.publicState()['title'] as String;
+    String phase() {
+      if (title().contains('Showdown')) return 'showdown';
+      if (ps.any((p) => g.privateState(p.id).kind == ScreenKind.choice)) return 'betting';
+      return 'between';
     }
 
     Option? option(String pid, String id) => g.privateState(pid).options.where((o) => o.id == id).firstOrNull;
-    bool canRaise(String pid) => option(pid, 'raise') != null;
+    bool canRaise(String pid) => option(pid, 'allin') != null;
     int minTo(String pid) => option(pid, 'raise')!.input!.min;
-    String dealerId() => ps[(g.publicState()['rows'] as List).indexWhere((r) => (r as Map)['label'].toString().endsWith('(D)'))].id;
-    String street() => g.publicState()['title'] as String;
-    String phase() {
-      if (g.isOver) return 'over';
-      if (g.publicState()['title'] == 'Waiting for players to reconnect') return 'waiting';
-      if (ps.any((p) => g.privateState(p.id).kind == ScreenKind.choice)) return 'betting';
-      return 'hand_over';
-    }
+    String dealerId() => ps[(g.publicState()['rows'] as List).indexWhere((r) => RegExp(r'\(D\b').hasMatch((r as Map)['label'] as String))].id;
 
-    bool dealtIn(String id) => g.privateState(id).cards?.isNotEmpty ?? false;
+    test('starts between hands with everyone bought in, and the host deals', () {
+      newGame(['a', 'b', 'c'], deal: false, dealer: 1);
+      expect(phase(), 'between');
+      expect(title(), contains('b deals first'));
+      expect([for (final p in ps) chipsOf(p.id)], [1000, 1000, 1000]);
+      expect(control('next')!.label, 'Start first hand');
+      expect(g.privateState('a').options.single.label, 'Ready');
+      host('next');
+      expect(phase(), 'betting');
+      expect(dealerId(), 'b');
+    });
+
+    test('everyone pressing Ready also deals', () {
+      newGame(['a', 'b'], deal: false);
+      ready('a');
+      expect(phase(), 'between');
+      ready('b');
+      expect(phase(), 'betting');
+    });
 
     test('heads-up blinds and order', () {
-      newGame(['a', 'b'], dealer: 0);
+      newGame(['a', 'b']);
       expect([betOf('a'), betOf('b')], [10, 20]); // dealer posts the small blind
+      expect(row('a')['label'], 'a (D, SB)');
+      expect(row('b')['label'], 'b (BB)');
       expect(toAct(), 'a'); // and acts first pre-flop
       act('a', 'call');
       expect(toAct(), 'b'); // big blind gets the option
       expect(canRaise('b'), isTrue);
       act('b', 'check');
-      expect(street(), contains('Flop'));
+      expect(title(), contains('Flop'));
+      expect(g.publicState()['banner'], 'Deal the flop');
       expect(toAct(), 'b'); // big blind acts first after the flop
     });
 
-    test('three-handed blinds rotate', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
+    test('shows each bet this round and who still has to act', () {
+      newGame(['a', 'b', 'c']);
       expect([for (final p in ps) betOf(p.id)], [0, 10, 20]);
+      expect(g.publicState()['subtitle'], contains('Still to act: a, b, c'));
+      expect(status('a'), contains('to act'));
+      expect(row('a')['highlight'], isTrue);
+      act('a', 'raise', 60);
+      expect(betOf('a'), 60);
+      expect(status('a'), contains('done'));
+      expect(g.publicState()['subtitle'], contains('Still to act: b, c'));
+      expect(g.publicState()['subtitle'], contains('This round: 90'));
+      act('b', 'call');
+      act('c', 'call');
+      // New round: bets reset, the round's summary goes in the log.
+      expect(title(), contains('Flop'));
+      expect([for (final p in ps) betOf(p.id)], [0, 0, 0]);
+      expect(pot(), 180);
+      expect(g.publicState()['log'], contains('Pre-flop · pot 180: a 60, b 60, c 60'));
+      expect(g.privateState('b').lines, contains('Your bet this round: 0'));
+    });
+
+    test('three-handed: the dealer moves on each hand', () {
+      newGame(['a', 'b', 'c']);
       expect(toAct(), 'a');
       act('a', 'fold');
       act('b', 'fold');
-      expect(phase(), 'hand_over');
-      for (final p in 'abc'.split('')) {
-        ready(p);
-      }
+      expect(phase(), 'between');
+      expect(g.publicState()['log'], contains('c wins 30 (everyone else folded).'));
+      expect(dealerId(), 'b'); // shown as next dealer
+      host('next');
       expect(dealerId(), 'b');
       expect([for (final p in ps) betOf(p.id)], [20, 0, 10]);
     });
 
-    test('min raise', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
-      expect(minTo('a'), 40);
-      expect(tryAct('a', 'raise', 30).ok, isFalse);
-      act('a', 'raise', 60); // raise by 40
-      expect(minTo('b'), 100); // next raise must be 40 more
-      expect(tryAct('b', 'raise', 99).ok, isFalse);
-      act('b', 'raise', 100);
+    test('the host can choose the dealer between hands', () {
+      newGame(['a', 'b', 'c']);
+      expect(control('dealer'), isNull); // not mid-hand
+      act('a', 'fold');
+      act('b', 'fold');
+      host('dealer', choice: ['a']);
+      expect(dealerId(), 'a');
+      host('next');
+      expect(dealerId(), 'a');
+      expect([for (final p in ps) betOf(p.id)], [0, 10, 20]);
     });
 
-    test('illegal moves', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
+    test('min raise, all in, and illegal moves', () {
+      newGame(['a', 'b', 'c']);
+      expect(minTo('a'), 40);
       expect(tryAct('b', 'call').ok, isFalse); // not b's turn
       expect(tryAct('a', 'check').ok, isFalse); // facing the big blind
-      expect(tryAct('a', 'raise', 40.5).ok, isFalse); // not a whole number
-      expect(tryAct('a', 'raise', 5000).ok, isFalse); // more than they have
-      expect(tryAct('a', 'raise', 'lots').ok, isFalse);
-      expect(tryAct('a', 'raise').ok, isFalse); // no amount
-      expect(tryAct('zz', 'fold').ok, isFalse); // not in the game
+      expect(tryAct('a', 'raise', 30).ok, isFalse);
+      expect(tryAct('a', 'raise', 40.5).ok, isFalse);
+      expect(tryAct('a', 'raise', 5000).ok, isFalse);
+      expect(tryAct('zz', 'fold').ok, isFalse);
+      act('a', 'raise', 60);
+      expect(minTo('b'), 100);
+      act('b', 'allin');
+      expect(betOf('b'), 1000);
+      expect(status('b'), contains('ALL IN'));
     });
 
     test('a short all-in does not reopen betting', () {
-      newGame(['a', 'b', 'c'], dealer: 0, stacks: {'c': 170}); // c has 150 behind after the big blind
-      act('a', 'call');
-      act('b', 'call');
-      act('c', 'check'); // flop, b acts first
-      expect(street(), contains('Flop'));
-      act('b', 'raise', 100); // b bets 100
-      act('c', 'raise', 150); // c all in for 150: only 50 more, not a full raise
-      act('a', 'call'); // a hadn't acted: a could have raised
-      expect(toAct(), 'b');
-      expect(canRaise('b'), isFalse); // b already acted: call or fold only
-      expect(tryAct('b', 'raise', 400).ok, isFalse);
-      act('b', 'call');
-      expect(street(), contains('Turn'));
-    });
-
-    test('a full raise reopens betting', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
+      newGame(['a', 'b', 'c'], stacks: {'c': 170});
       act('a', 'call');
       act('b', 'call');
       act('c', 'check');
       act('b', 'raise', 100);
-      act('c', 'raise', 200); // full raise
-      act('a', 'fold');
-      expect(canRaise('b'), isTrue);
+      act('c', 'allin'); // 150: only 50 more, not a full raise
+      act('a', 'call');
+      expect(toAct(), 'b');
+      expect(canRaise('b'), isFalse);
+      act('b', 'call');
+      expect(title(), contains('Turn'));
     });
 
-    test('everyone all in runs the board with side pots', () {
-      final holes = [['As', 'Ad'], ['Ks', 'Kd'], ['Qs', 'Qd']];
-      final board = ['2c', '7h', '9d', '3s', '4h'];
-      // c deals, a posts the small blind, b the big blind; stacks 100 / 300 / 600
-      newGame(['a', 'b', 'c'], dealer: 2, deck: stackedDeck(holes, board), stacks: {'a': 100, 'b': 300, 'c': 600});
-      act('c', 'raise', 600);
+    test('checking down goes to a showdown where the host picks the winner', () {
+      newGame(['a', 'b', 'c']);
       act('a', 'call');
       act('b', 'call');
-      expect(phase(), 'hand_over');
-      expect((g.publicState()['cards'] as List).length, 5);
-      expect(chipsOf('a'), 300); // main pot 3 x 100
-      expect(chipsOf('b'), 400); // side pot 2 x 200
-      expect(chipsOf('c'), 300); // uncalled 300 comes back
+      act('c', 'check');
+      for (var i = 0; i < 3; i++) {
+        act('b', 'check');
+        act('c', 'check');
+        act('a', 'check');
+      }
+      expect(phase(), 'showdown');
+      expect(g.publicState()['banner'], 'Who won the main pot?');
+      expect(tryAct('a', 'check').ok, isFalse);
+      final award = control('award')!;
+      expect(award.primary, isTrue);
+      expect(award.options.map((o) => o.id), ['b', 'c', 'a']); // from the dealer's left
+      expect(tryHost('award', choice: ['zz']).ok, isFalse);
+      host('award', choice: ['c']);
+      expect(phase(), 'between');
+      expect(chipsOf('c'), 1040);
+      expect(total(), 3000);
+      expect((g.publicState()['log'] as List).where((l) => (l as String).contains(' · pot ')).length, 4);
+    });
+
+    test('side pots are paid one at a time and uncalled chips come back', () {
+      // c deals, a posts the small blind, b the big blind; stacks 100 / 300 / 600
+      newGame(['a', 'b', 'c'], dealer: 2, stacks: {'a': 100, 'b': 300, 'c': 600});
+      act('c', 'allin');
+      act('a', 'call');
+      act('b', 'call');
+      expect(phase(), 'showdown');
+      expect(chipsOf('c'), 300); // the uncalled 300 is back already
+      expect(g.publicState()['banner'], contains('Deal out the rest'));
+      expect(pot(), 700);
+      host('award', choice: ['a']); // main pot 3 x 100
+      expect(chipsOf('a'), 300);
+      expect(control('award')!.options.map((o) => o.id), ['b', 'c']); // side pot: a isn't in it
+      host('award', choice: ['b']); // side pot 2 x 200
+      expect(chipsOf('b'), 400);
+      expect(phase(), 'between');
       expect(total(), 1000);
     });
 
-    test('split pot', () {
-      final holes = [['2c', '3d'], ['2d', '3c']];
-      final board = ['As', 'Ks', 'Qd', 'Jc', 'Th']; // board plays
-      newGame(['a', 'b'], chips: 500, dealer: 0, deck: stackedDeck(holes, board));
-      act('a', 'raise', 500);
-      act('b', 'call');
-      expect([chipsOf('a'), chipsOf('b')], [500, 500]);
-      expect(phase(), 'hand_over');
-    });
-
-    test('odd chip goes left of the dealer', () {
-      final holes = [['2c', '3d'], ['2d', '3c'], ['4c', '5c']];
-      final board = ['As', 'Ks', 'Qd', 'Jc', 'Th'];
-      newGame(['a', 'b', 'c'], dealer: 0, deck: stackedDeck(holes, board));
+    test('split pot: odd chip goes left of the dealer', () {
+      newGame(['a', 'b', 'c']);
       act('a', 'call');
       act('b', 'fold'); // b's small blind (10) stays in: pot 50
       act('c', 'check');
@@ -328,153 +315,196 @@ void main() {
         act('c', 'check');
         act('a', 'check');
       }
-      // pot 50 split between c and a; odd chip to the first winner left of dealer (b folded -> c)
+      host('award', choice: ['a', 'c']);
       expect(chipsOf('c'), 1005);
       expect(chipsOf('a'), 1005);
       expect(chipsOf('b'), 990);
     });
 
-    test('bust out and game over', () {
-      final holes = [['As', 'Ad'], ['7c', '2d']];
-      final board = ['Ac', 'Kd', '9h', '5s', '3c'];
-      newGame(['a', 'b'], chips: 500, dealer: 0, deck: stackedDeck(holes, board));
-      act('a', 'raise', 500);
-      act('b', 'call');
-      expect(phase(), 'over');
-      expect(g.publicState()['banner'], 'a wins the game!');
-      expect((g.publicState()['log'] as List), contains('b is out of chips.'));
-      expect(chipsOf('a'), 1000);
-      expect(tryAct('a', 'check').ok, isFalse);
+    test('a busted player sits out until the host adds chips', () {
+      newGame(['a', 'b', 'c'], buyIn: 500);
+      act('a', 'allin');
+      act('b', 'fold');
+      act('c', 'call');
+      host('award', choice: ['c']);
+      expect(chipsOf('a'), 0);
+      expect(status('a'), contains('out of chips'));
+      expect(g.publicState()['log'], contains('a is out of chips.'));
+      expect(g.privateState('a').body, contains('out of chips'));
+      expect(g.privateState('a').options, isEmpty);
+      host('next');
+      expect(g.privateState('a').title, contains('Hand 2'));
+      expect(toAct(), isNot('a'));
+      act(toAct()!, 'fold');
+      // Revive a with the buy-in.
+      final add = control('chips')!;
+      expect(add.input!.defaultValue, 500);
+      expect(add.options.firstWhere((o) => o.id == 'a').sub, 'out of chips');
+      host('chips', choice: ['a'], value: 500);
+      expect(chipsOf('a'), 500);
+      expect(status('a'), contains('in for 1000 (-500)'));
+      host('next');
+      expect(row('a')['dim'], isFalse);
+      expect(status('a'), isNot(contains('sitting out')));
     });
 
-    test('a player leaving mid-hand', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
-      final before = total();
-      g.onPlayerRemoved('b'); // b (small blind) leaves out of turn
+    test('nobody left to play waits for a revive instead of ending', () {
+      newGame(['a', 'b']);
+      act('a', 'allin');
+      act('b', 'call');
+      host('award', choice: ['b']);
+      expect(g.isOver, isFalse);
+      expect(control('next'), isNull);
+      expect(tryHost('next').ok, isFalse);
+      host('chips', choice: ['a'], value: 1000);
+      expect(control('next'), isNotNull);
+    });
+
+    test('the buy-in can change mid-game, and auto rebuy uses it', () {
+      newGame(['a', 'b', 'c'], autoRebuy: true);
+      host('buyin', value: 2500);
+      expect(control('buyin')!.label, 'Buy-in: 2500');
+      expect(control('chips')!.input!.defaultValue, 2500);
+      expect(g.publicState()['subtitle'], contains('Buy-in: 2500'));
+      act('a', 'allin');
+      act('b', 'fold');
+      act('c', 'call');
+      host('award', choice: ['c']);
+      expect(chipsOf('a'), 2500); // rebought automatically
+      expect(status('a'), contains('in for 3500'));
+      host('autorebuy', choice: ['off']);
+      expect(control('autorebuy')!.label, 'Auto rebuy: off');
+    });
+
+    test('chips cannot be added to a player still in the hand', () {
+      newGame(['a', 'b', 'c']);
+      expect(control('chips')!.options.map((o) => o.id), isEmpty);
+      act('a', 'fold');
+      expect(control('chips')!.options.map((o) => o.id), ['a']);
+      expect(tryHost('chips', choice: ['b'], value: 100).ok, isFalse);
+    });
+
+    test('blinds change from the next hand', () {
+      newGame(['a', 'b', 'c']);
+      host('blinds', value: 50);
+      expect([for (final p in ps) betOf(p.id)], [0, 10, 20]);
+      act('a', 'fold');
+      act('b', 'fold');
+      host('next');
+      expect([for (final p in ps) betOf(p.id)], [50, 0, 25]);
+    });
+
+    test('sitting out skips a player and keeps their chips', () {
+      newGame(['a', 'b', 'c']);
+      host('sitout', choice: ['c']);
+      act('a', 'fold');
+      act('b', 'fold');
+      host('next');
+      expect(status('c'), contains('sitting out'));
+      expect(g.privateState('c').kind, ScreenKind.waiting);
+      expect(chipsOf('c'), 1010);
+    });
+
+    test('the host can play for someone and undo mistakes', () {
+      newGame(['a', 'b', 'c']);
+      final pf = control('playfor')!;
+      expect(pf.label, 'Play for a');
+      expect(pf.options.map((o) => o.id), containsAll(['fold', 'call', 'raise', 'allin']));
+      host('playfor', choice: ['raise'], value: 100);
+      expect(betOf('a'), 100);
+      host('undo');
+      expect(betOf('a'), 0);
+      expect(toAct(), 'a');
+      expect(total(), 3000);
+      act('a', 'call');
+      act('b', 'call');
+      act('c', 'check');
+      expect(title(), contains('Flop'));
+      host('undo'); // back to c's turn before the flop
+      expect(title(), contains('Pre-flop'));
+      expect(toAct(), 'c');
+      act('c', 'check');
+      // Undo a payout.
+      for (var i = 0; i < 3; i++) {
+        act('b', 'check');
+        act('c', 'check');
+        act('a', 'check');
+      }
+      host('award', choice: ['a']);
+      host('undo');
+      expect(phase(), 'showdown');
+      host('award', choice: ['b']);
+      expect(chipsOf('b'), 1040);
+    });
+
+    test('a player leaving mid-hand folds and clears undo', () {
+      newGame(['a', 'b', 'c']);
+      act('a', 'call');
+      g.onPlayerRemoved('b');
       expect(folded('b'), isTrue);
-      act('a', 'fold'); // only c left: wins uncontested
-      expect(phase(), 'hand_over');
-      expect(total(), before);
-      ready('a');
-      ready('c');
-      expect(phase(), 'betting');
-      expect(dealtIn('b'), isFalse); // never dealt in again
+      expect(control('undo'), isNull);
+      act('c', 'check');
+      expect(title(), contains('Flop'));
+      act('c', 'fold');
+      expect(phase(), 'between');
+      host('next');
+      expect(status('b'), contains('left'));
+      expect(row('b')['dim'], isTrue);
       expect(ctx.updates, greaterThan(0));
     });
 
-    test('leaving on your turn folds', () {
-      newGame(['a', 'b'], dealer: 0);
-      g.onPlayerRemoved('a');
-      expect(phase(), 'over'); // only b has chips and hasn't left
-      expect(g.publicState()['banner'], 'b wins the game!');
-    });
-
-    test('disconnected players sit out', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
+    test('offline players are still dealt in (the cards are real)', () {
+      newGame(['a', 'b', 'c']);
+      g.onPlayerConnectionChanged('a', false);
+      expect(status('a'), contains('offline'));
+      expect(toAct(), 'a');
+      expect(g.publicState()['secondsLeft'], isNull); // no auto-fold
       act('a', 'fold');
       act('b', 'fold');
-      g.onPlayerConnectionChanged('b', false);
-      ready('a');
-      ready('c');
-      expect(dealtIn('b'), isFalse);
-      expect(ps.where((p) => dealtIn(p.id)).length, 2);
-      act(toAct()!, 'fold');
-      g.onPlayerConnectionChanged('c', false);
-      ready('a');
-      expect(phase(), 'waiting'); // only a is here
-      expect(g.privateState('a').title, 'Waiting for players to reconnect');
-      g.onPlayerConnectionChanged('b', true);
-      expect(phase(), 'betting');
-    });
-
-    test('a disconnect can start the next hand when everyone else is ready', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
-      act('a', 'fold');
-      act('b', 'fold');
-      ready('a');
-      ready('b');
-      expect(phase(), 'hand_over'); // still waiting for c
-      g.onPlayerConnectionChanged('c', false);
-      expect(phase(), 'betting');
-      expect(dealtIn('c'), isFalse);
+      host('next');
+      expect(status('a'), isNot(contains('sitting out')));
     });
 
     test('timeout checks or folds', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
-      g.timeoutForTesting(); // a faces the big blind: fold
+      newGame(['a', 'b', 'c'], turnSeconds: 30);
+      expect(g.publicState()['secondsLeft'], inInclusiveRange(29, 30));
+      g.timeoutForTesting();
       expect(folded('a'), isTrue);
       act('b', 'call');
-      g.timeoutForTesting(); // c can check
+      g.timeoutForTesting();
       expect(folded('c'), isFalse);
-      expect(street(), contains('Flop'));
-    });
-
-    test('a disconnected player to act gets a grace timer of at most 20s', () {
-      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 60);
-      expect(g.publicState()['secondsLeft'], inInclusiveRange(59, 60));
-      g.onPlayerConnectionChanged('a', false); // a is to act
-      expect(g.publicState()['secondsLeft'], inInclusiveRange(19, 20));
-      g.onPlayerConnectionChanged('a', true);
-      expect(g.publicState()['secondsLeft'], inInclusiveRange(19, 20)); // reconnecting never extends it
-
-      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 10);
-      g.onPlayerConnectionChanged('a', false);
-      expect(g.publicState()['secondsLeft'], inInclusiveRange(9, 10));
-
-      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 0);
-      expect(g.publicState()['secondsLeft'], isNull);
-      g.onPlayerConnectionChanged('a', false);
-      expect(g.publicState()['secondsLeft'], inInclusiveRange(19, 20));
-    });
-
-    test('disconnect/reconnect cannot push the turn deadline later', () {
-      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 60);
-      g.onPlayerConnectionChanged('a', false);
-      final shortened = g.publicState()['secondsLeft'] as int;
-      expect(shortened, inInclusiveRange(19, 20));
-      for (var i = 0; i < 5; i++) {
-        g.onPlayerConnectionChanged('a', true);
-        g.onPlayerConnectionChanged('a', false);
-      }
-      g.onPlayerConnectionChanged('a', true);
-      expect(g.publicState()['secondsLeft'] as int, lessThanOrEqualTo(shortened));
-
-      // No turn limit: the grace deadline set on disconnect also survives reconnecting.
-      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 0);
-      g.onPlayerConnectionChanged('a', false);
-      g.onPlayerConnectionChanged('a', true);
-      g.onPlayerConnectionChanged('a', false);
-      g.onPlayerConnectionChanged('a', true);
-      expect(g.publicState()['secondsLeft'], inInclusiveRange(19, 20));
-
-      // A short turn limit is not extended up to the grace period either.
-      newGame(['a', 'b', 'c'], dealer: 0, turnSeconds: 10);
-      g.onPlayerConnectionChanged('a', false);
-      g.onPlayerConnectionChanged('a', true);
-      expect(g.publicState()['secondsLeft'] as int, lessThanOrEqualTo(10));
+      expect(title(), contains('Flop'));
     });
 
     test('random games conserve chips', () {
       for (var seed = 0; seed < 40; seed++) {
         final rng = Random(seed);
-        newGame(['a', 'b', 'c', 'd'], chips: 200, bb: 20, seed: seed);
-        for (var i = 0; i < 2000; i++) {
-          if (g.isOver) break;
+        newGame(['a', 'b', 'c', 'd'], buyIn: 200, bb: 20, seed: seed, dealer: seed % 4);
+        var given = 800;
+        for (var i = 0; i < 1500; i++) {
           final pid = toAct();
           if (pid == null) {
-            g.timeoutForTesting(); // hand over: deal the next one
+            final award = control('award');
+            if (award != null) {
+              final n = 1 + rng.nextInt(award.options.length);
+              host('award', choice: [for (final o in (award.options.toList()..shuffle(rng)).take(n)) o.id]);
+            } else if (control('next') != null) {
+              host('next');
+            } else {
+              host('chips', choice: [ps[rng.nextInt(4)].id], value: 200);
+              given += 200;
+            }
             continue;
           }
-          final sc = g.privateState(pid);
-          final ids = sc.options.map((o) => o.id).toList();
-          final move = [
-            'fold',
-            ids.contains('check') ? 'check' : 'call',
-            if (ids.contains('raise')) 'raise',
-          ][rng.nextInt(2 + (ids.contains('raise') ? 1 : 0))];
+          final ids = g.privateState(pid).options.map((o) => o.id).toList();
+          final move = ids[rng.nextInt(ids.length)];
           final input = option(pid, 'raise')?.input;
           act(pid, move, move == 'raise' ? input!.min + rng.nextInt(input.max - input.min + 1) : null);
-          expect(total(), 800, reason: 'seed $seed');
+          if (rng.nextInt(20) == 0 && control('undo') != null) host('undo');
+          // Undo can take back a rebuy, so count what's actually been given.
+          final bought = ps.map((p) => int.parse(RegExp(r'in for (\d+)').firstMatch(status(p.id))?.group(1) ?? '0'));
+          if (phase() == 'between') given = bought.reduce((a, b) => a + b);
+          expect(total(), given, reason: 'seed $seed step $i');
         }
         for (final p in ps) {
           expect(chipsOf(p.id), greaterThanOrEqualTo(0));
@@ -482,43 +512,5 @@ void main() {
         g.dispose();
       }
     });
-
-    test('privacy: hole cards are only in the owner\'s secret screen', () {
-      newGame(['a', 'b', 'c'], dealer: 0);
-      expect(g.publicState().toString(), isNot(matches(RegExp('[♠♥♦♣]'))));
-      final holes = {for (final p in ps) p.id: g.privateState(p.id).cards!};
-      expect(g.publicState()['cards'], isEmpty);
-      for (final p in ps) {
-        final sc = g.privateState(p.id);
-        expect(sc.cards, hasLength(2));
-        expect(sc.secret, isTrue);
-        final visible = '${sc.title} ${(sc.lines ?? []).join(' ')}';
-        for (final c in sc.cards!) {
-          expect(visible, isNot(contains(c)));
-          expect(visible, isNot(contains(prettyCard(c))));
-        }
-        expect((sc.lines ?? []).join(' '), contains('Pot:'));
-      }
-      // still hidden after a street is dealt, while two players remain
-      act('a', 'call');
-      act('b', 'call');
-      act('c', 'check');
-      final pub = g.publicState().toString();
-      for (final c in holes.values.expand((x) => x)) {
-        expect(pub, isNot(contains(prettyCard(c))));
-        expect(g.publicState()['cards'], isNot(contains(c)));
-      }
-    });
-  });
-
-  test('secret poker screens keep public status out of the hidden body', () {
-    final ps = [for (final n in ['a', 'b', 'c']) Player(id: n, name: n.toUpperCase(), reconnectToken: 't$n')];
-    final g = PokerGame()..start(_Ctx(), ps, {'startingChips': 1000, 'bigBlind': 20, 'turnSeconds': 0});
-    for (final p in ps) {
-      final sc = g.privateState(p.id);
-      if (sc.secret) expect(sc.body, isNull, reason: 'body is hidden on secret screens: ${sc.title}');
-      expect(sc.title, isNotNull);
-    }
-    g.dispose();
   });
 }

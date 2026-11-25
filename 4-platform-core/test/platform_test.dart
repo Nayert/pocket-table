@@ -8,7 +8,21 @@ class _PressGame extends Game {
   final pressed = <String, String>{};
   final removed = <String>[];
   final values = <Object?>[];
+  final hostActions = <PlayerAction>[];
   late List<Player> players;
+
+  @override
+  List<HostControl> hostControls() => const [
+        HostControl('pick', 'Pick', multi: true, options: [Option('x', 'X'), Option('y', 'Y')]),
+        HostControl('amount', 'Amount', input: OptionInput(min: 1, max: 100)),
+        HostControl('plain', 'Plain'),
+      ];
+
+  @override
+  ActionResult handleHostAction(PlayerAction action) {
+    hostActions.add(action);
+    return const ActionResult.ok();
+  }
 
   @override
   String get id => 'press';
@@ -195,5 +209,26 @@ void main() {
     t.simulateMessage('c1', 'action', {'actionId': 'press', 'choice': {'x': 1}});
     expect((platform.activeGame as _PressGame).pressed, isEmpty);
     expect(t.lastTo('c1', type: 'action.error'), isNotNull);
+  });
+
+  test('host controls are checked before the game sees them', () {
+    join('c1', 'Ana');
+    join('c2', 'Ben');
+    expect(platform.hostAction('plain'), 'No game is running.');
+    platform.startGame();
+    final game = platform.activeGame as _PressGame;
+    expect(platform.hostAction('nope'), isNotNull);
+    expect(platform.hostAction('pick'), isNotNull); // nothing picked
+    expect(platform.hostAction('pick', choice: ['z']), isNotNull);
+    expect(platform.hostAction('pick', choice: ['x', 'x']), isNotNull);
+    expect(platform.hostAction('amount', value: 0), isNotNull);
+    expect(platform.hostAction('amount', value: 2.5), isNotNull);
+    expect(platform.hostAction('plain', choice: ['x']), isNotNull);
+    expect(game.hostActions, isEmpty);
+    expect(platform.hostAction('pick', choice: ['x', 'y']), isNull);
+    expect(platform.hostAction('amount', value: 50), isNull);
+    expect(platform.hostAction('plain'), isNull);
+    expect(game.hostActions.map((a) => a.actionId), ['pick', 'amount', 'plain']);
+    expect(game.hostActions[1].intValue, 50);
   });
 }

@@ -71,27 +71,54 @@ void main() {
     expect(startButton().onPressed, isNotNull);
   });
 
-  testWidgets('table view never shows hole cards or roles', (tester) async {
+  testWidgets('poker table: host deals, adds chips and pays the pot', (tester) async {
+    tester.view.physicalSize = const Size(1200, 4000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     await c.platform.host(t);
     c.selectGame('poker');
     join('c1', 'Ana');
     join('c2', 'Ben');
     expect(c.startGame(), isNull);
-    await tester.pumpWidget(app(TableScreen(controller: c)));
+    await tester.pumpWidget(app(ListenableBuilder(listenable: c, builder: (_, __) => TableScreen(controller: c))));
     await tester.pump();
+    expect(find.byType(PlayingCard), findsNothing); // cards are dealt at the real table
+    expect(find.textContaining('Ready to start'), findsOneWidget);
 
-    // Every card drawn on the table must be a community card.
-    final drawn = tester.widgetList<PlayingCard>(find.byType(PlayingCard)).map((w) => w.code).toSet();
-    final game = c.platform.activeGame!;
-    final board = ((game.publicState()['cards'] as List?) ?? const []).cast<String>().toSet();
-    expect(drawn.difference(board), isEmpty);
-    for (final pl in c.platform.players) {
-      final hole = game.privateState(pl.id).cards ?? const <String>[];
-      expect(hole, isNotEmpty);
-      for (final card in hole) {
-        expect(drawn, isNot(contains(card)));
-      }
-    }
+    await tester.tap(find.text('Start first hand'));
+    await tester.pump();
+    expect(find.textContaining('Hand 1 · Pre-flop'), findsOneWidget);
+    expect(find.textContaining('Still to act'), findsOneWidget);
+
+    // Play for whoever is up: fold, so the other player wins the blinds.
+    final turn = c.platform.activeGame!.publicState()['rows'] as List;
+    final upName = (turn.firstWhere((r) => (r as Map)['highlight'] == true) as Map)['label'].toString().split(' ').first;
+    await tester.tap(find.text('Play for $upName'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Fold'));
+    await tester.pump();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Hand 1 over'), findsOneWidget);
+    expect(find.textContaining('everyone else folded'), findsOneWidget);
+
+    // Add chips: the dialog asks who and how many (default: the buy-in).
+    await tester.tap(find.text('Add chips'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pump();
+    expect(find.text('Pick one.'), findsOneWidget);
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('Ana')));
+    await tester.pump();
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text, '1000');
+    await tester.enterText(find.byType(TextField), '250');
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Ana adds 250 chips.'), findsWidgets);
+
+    await tester.tap(find.text('Undo'));
+    await tester.pump();
+    expect(find.textContaining('Ana adds 250 chips.'), findsNothing);
     c.endGame();
   });
 

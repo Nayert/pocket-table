@@ -23,20 +23,19 @@ Rules in detail (pinned by `prototype/test_prototypes.py`):
 - **Timers and absence:** each phase has a timer, and missing actions count as no action or abstain. A phase ends early once every living, *connected* player has acted. A player who leaves or is kicked dies (role revealed if the setting is on), which can end the game.
 - **Privacy:** roles and night results go only in a `secret` screen's body. Titles, lines and options are the same for every role.
 
-### Poker (Texas Hold'em)
+### Poker (chip tracker for Texas Hold'em)
 
-- Secure shuffle (`Random.secure()`), dealing hole and community cards
-- Betting rounds, blinds, chips, folding, all-in
-- Hand evaluator and side pots
-- Play chips only — no real money
+The cards are dealt at a real table. The app only keeps the chips.
 
-Rules in detail (pinned by `prototype/poker.py` + tests):
-
-- **Blinds:** the small blind is left of the dealer and the big blind is next. Heads-up, the dealer posts the small blind and acts first before the flop. The button moves one live seat each hand.
-- **Raises:** the minimum raise is the last full bet or raise (the big blind to start). Anyone may go all in for less, but a short all-in doesn't reopen raising for players who already acted.
-- **Side pots** come from each player's total contribution, and an uncalled excess goes back to the player. At a split, the odd chips go to the first winner left of the dealer.
-- **Absence:** a disconnected player on their turn is auto-checked or folded after 20 s, or sooner if the turn timer runs out first. Reconnecting never extends the turn. Disconnected players sit out new hands, and if fewer than two can play, the game waits. A player who leaves or is kicked folds and is never dealt in again.
-- **End:** busted players watch, and the game ends when fewer than two players who haven't left have chips.
+- **Buy-in:** everyone starts with the buy-in. The host can change it mid-game (it sets what a rebuy gives); stacks already on the table stay as they are. With *Auto rebuy* on, a player who runs out gets the buy-in again automatically.
+- **Dealer:** chosen at random to start, or picked by the host between hands. The button then moves one seat each hand, skipping players with no chips or sitting out. The table shows (D), (SB) and (BB).
+- **Blinds** are posted automatically. Heads-up, the dealer posts the small blind and acts first before the flop. The host can change the blinds; it takes effect from the next hand.
+- **Betting rounds:** each player bets from their phone (fold, check, call, bet/raise, all in). The table shows the pot, each player's bet this round, who still has to act, and a one-line summary of every finished round of the hand. Min-raise and short all-in rules are enforced.
+- **Showdown:** after the river (or when nobody can bet any more) the host taps who won each pot, main pot first, then side pots. Picking several players splits it; odd chips go to the first winner left of the dealer. Uncalled chips go back automatically.
+- **Reviving:** a player with no chips sits out until the host uses *Add chips*. The table tracks each player's total bought in and their net result.
+- **Host tools:** *Play for* (make the current player's move, e.g. their phone died), *Sit out / back in*, and *Undo* (up to 50 steps).
+- **Absence:** offline players are still dealt in (they're at the table); the host can play for them. The optional turn timer checks or folds. A player who leaves or is kicked folds and is never dealt in again.
+- **End:** the game never ends by itself; the host presses End.
 
 ## What it needs from other layers
 
@@ -71,11 +70,11 @@ That's it. Games never use the transport, the UI or the network directly.
   pubspec.yaml
   lib/games.dart                    # exports games + allGames list (the registry the lobby reads)
   lib/src/mafia/mafia_game.dart
-  lib/src/poker/cards.dart          # deck, secure shuffle, pretty printing
-  lib/src/poker/hand_evaluator.dart
-  lib/src/poker/pots.dart           # side pots + awarding
-  lib/src/poker/poker_game.dart
-  test/poker_test.dart              # evaluator, pots, and game flow
+  lib/src/poker/cards.dart          # deck, pretty printing (not used by the chip tracker)
+  lib/src/poker/hand_evaluator.dart # (not used by the chip tracker)
+  lib/src/poker/pots.dart           # side pots
+  lib/src/poker/poker_game.dart     # the chip tracker
+  test/poker_test.dart              # evaluator, pots, and chip tracker flow
   test/mafia_test.dart
   prototype/                        # Python versions of the rules, with tests
     poker_eval.py  pots.py  poker.py  mafia.py  test_prototypes.py

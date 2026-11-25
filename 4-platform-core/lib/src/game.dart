@@ -55,6 +55,29 @@ class GameSetting {
   final int step;
 }
 
+/// A button on the host's table view, for things only the host decides
+/// (e.g. who won a poker pot, topping up a player's chips).
+///
+/// Pressing it may first ask the host to pick from [options] (one, or with
+/// [multi] one or more) and/or type a number ([input], or the picked
+/// option's own input). The answer reaches [Game.handleHostAction] as a
+/// [PlayerAction] whose actionId is [id], already checked against this.
+class HostControl {
+  const HostControl(this.id, this.label,
+      {this.options = const [], this.multi = false, this.input, this.primary = false, this.help});
+  final String id;
+  final String label;
+  final List<Option> options;
+  final bool multi;
+  final OptionInput? input;
+
+  /// Draw it as the main button (e.g. "Next hand").
+  final bool primary;
+
+  /// One line shown above the choices in the host's dialog.
+  final String? help;
+}
+
 /// Every game implements this. The platform only ever talks to games
 /// through it, so adding a game never means changing the core.
 ///
@@ -90,6 +113,13 @@ abstract class Game {
   bool get isOver;
 
   void onPlayerConnectionChanged(String playerId, bool connected) {}
+
+  /// Buttons for the host's table view right now. Most games have none.
+  List<HostControl> hostControls() => const [];
+
+  /// The host pressed one of [hostControls]. [action.actionId] is the
+  /// control's id; the platform has already checked the picks and number.
+  ActionResult handleHostAction(PlayerAction action) => const ActionResult.error('This game has no host controls.');
 
   /// The player left for good (kicked, or pressed Leave mid-game). They will
   /// never act again: fold them, kill them off, or whatever the rules say.
