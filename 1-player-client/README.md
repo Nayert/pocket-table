@@ -53,7 +53,13 @@
   style.css       # mobile-first, big buttons
   app.js          # socket, join, reconnect token, message dispatch
   screens.js      # one render function per screen.* type, cards, countdown
+  404.html        # "Page not found" in the same theme (uses absolute /style.css)
+  favicon.svg     # poker-chip icon; favicon.ico and apple-touch-icon.png are made from it
 ```
+
+**Join form checks:** the room code must be 4 characters from the relay's alphabet (no O, I, 0 or 1) and the name 1 to 16 visible characters, with a clear message for each problem. A hidden "website" field is a spam trap: if a bot fills it, the form pretends to join and does nothing. After a `rate_limited` reply the Join button waits 30 seconds. These are only for quick feedback; the relay and host check everything again.
+
+After editing anything here, run `6-host-app-ui/tool/copy_player_client.sh` so the phone's Local mode serves the same files.
 
 ## Running it
 

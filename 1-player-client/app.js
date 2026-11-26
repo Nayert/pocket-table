@@ -10,6 +10,8 @@ const NAME_MAX = 16;
 const CONNECT_TIMEOUT_MS = 10000;
 const RETRY_MAX_MS = 10000;
 const SHOW_RETRY_AFTER = 4; // failed attempts before offering "Retry now"
+const CODE_CHARS = /^[A-HJ-NP-Z2-9]+$/; // the relay never uses O, I, 0 or 1
+const RATE_LIMIT_WAIT_MS = 30000;
 
 // Every join.error reason in shared-protocol/README.md
 const JOIN_ERRORS = {
@@ -19,6 +21,7 @@ const JOIN_ERRORS = {
   bad_name: `Pick a name between 1 and ${NAME_MAX} characters.`,
   version_mismatch: "This page doesn't match the host's app version. Refresh this page, or ask the host to update their app.",
   game_in_progress: "A game is already running. You can join when it's back in the lobby.",
+  rate_limited: "Too many join attempts from your network. Wait a minute, then try again.",
 };
 const CLOSED_REASONS = {
   host_left: "The host closed the room.",
@@ -42,6 +45,7 @@ const state = {
   failures: 0,
   retryTimer: null,
   connectTimer: null,
+  waitUntil: 0,      // after "rate_limited", don't let the Join button spam the server
 };
 
 // ---- localStorage (wrapped: private browsing can throw) ----
@@ -79,6 +83,22 @@ function saveToken(room, token) {
 function cleanCode(raw) {
   return String(raw || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, CODE_LENGTH);
 }
+// What's wrong with a typed room code or name, or "" if it's fine.
+// The host and relay check again: this is only for quick, clear feedback.
+function codeProblem(raw) {
+  const code = cleanCode(raw);
+  if (!code) return "Enter the room code from the host's screen.";
+  if (!CODE_CHARS.test(code)) return "Room codes never use O, I, 0 or 1. Check the code on the host's screen.";
+  if (code.length !== CODE_LENGTH) return `The room code has ${CODE_LENGTH} characters. You typed ${code.length}.`;
+  return "";
+}
+function nameProblem(raw) {
+  const nm = cleanName(raw);
+  if (!nm) return String(raw || "").length ? "Use letters, numbers or emoji in your name." : "Enter your name.";
+  if (nm.length > NAME_MAX) return JOIN_ERRORS.bad_name;
+  return "";
+}
+
 function cleanName(raw) {
   // Control characters and invisible formatting characters (zero-width,
   // direction overrides) are removed so nobody can look like someone else.
@@ -297,6 +317,10 @@ function handle(type, p) {
       const reason = String(p.reason || "");
       const msg = JOIN_ERRORS[reason] || "Couldn't join (" + reason + ").";
       const hadSeat = state.joined || state.resuming;
+      // Slowed down while reconnecting: keep the seat; the normal retry
+      // (with growing delays) gets us back in once the limit passes.
+      if (reason === "rate_limited" && hadSeat) break;
+      if (reason === "rate_limited") state.waitUntil = Date.now() + RATE_LIMIT_WAIT_MS;
       store.del(tokenKey(state.room));
       closeSocket();
       resetSeat();
@@ -376,20 +400,46 @@ function init() {
   });
   nameInput.addEventListener("input", () => nameInput.removeAttribute("aria-invalid"));
 
+  const flag = (input, message) => {
+    input.setAttribute("aria-invalid", "true");
+    $("join-error").textContent = message;
+  };
+  // Check a field when the player leaves it, but only once they've typed
+  // something, so tabbing through an empty form doesn't shout at them.
+  roomInput.addEventListener("blur", () => {
+    const problem = roomInput.value && codeProblem(roomInput.value);
+    if (problem) flag(roomInput, problem);
+  });
+  nameInput.addEventListener("blur", () => {
+    const problem = nameInput.value && nameProblem(nameInput.value);
+    if (problem) flag(nameInput, problem);
+  });
+
   $("join-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const code = cleanCode(roomInput.value);
-    const nm = cleanName(nameInput.value);
-    if (code.length !== CODE_LENGTH) {
-      roomInput.setAttribute("aria-invalid", "true");
-      roomInput.focus();
-      $("join-error").textContent = `The room code has ${CODE_LENGTH} characters.`;
+    // Spam trap: a person never sees this field. Look busy and do nothing.
+    if ($("website-input").value) {
+      $("join-btn").disabled = true;
+      $("join-btn").textContent = "Joining…";
       return;
     }
-    if (!nm || nm.length > NAME_MAX) {
-      nameInput.setAttribute("aria-invalid", "true");
+    const wait = Math.ceil((state.waitUntil - Date.now()) / 1000);
+    if (wait > 0) {
+      $("join-error").textContent = `Too many join attempts. Try again in ${wait} seconds.`;
+      return;
+    }
+    const code = cleanCode(roomInput.value);
+    const nm = cleanName(nameInput.value);
+    const codeErr = codeProblem(roomInput.value);
+    if (codeErr) {
+      flag(roomInput, codeErr);
+      roomInput.focus();
+      return;
+    }
+    const nameErr = nameProblem(nameInput.value);
+    if (nameErr) {
+      flag(nameInput, nameErr);
       nameInput.focus();
-      $("join-error").textContent = JOIN_ERRORS.bad_name;
       return;
     }
     if (state.room && state.room !== code) resetSeat();

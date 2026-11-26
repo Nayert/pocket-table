@@ -6,5 +6,6 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 src="$here/../1-player-client"
 dest="$here/assets/player_client"
 mkdir -p "$dest"
-cp "$src"/index.html "$src"/style.css "$src"/app.js "$src"/screens.js "$dest"/
+cp "$src"/index.html "$src"/404.html "$src"/style.css "$src"/app.js "$src"/screens.js \
+   "$src"/favicon.svg "$src"/favicon.ico "$src"/apple-touch-icon.png "$dest"/
 echo "Copied player client into $dest"

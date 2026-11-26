@@ -109,6 +109,7 @@ label { display: block; color: var(--muted); font-size: 15px; margin: 16px 0 6px
   touch-action: manipulation;
   overflow-wrap: anywhere;
 }
+a.btn { text-decoration: none; text-align: center; }
 .btn:active { transform: scale(0.98); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.primary:active { background: var(--accent-2); }
@@ -139,6 +140,10 @@ label { display: block; color: var(--muted); font-size: 15px; margin: 16px 0 6px
 .body-text { white-space: pre-line; overflow-wrap: anywhere; }
 .muted { color: var(--muted); }
 .error { color: var(--danger); min-height: 1.4em; }
+
+/* Honeypot field for spam bots: off-screen rather than display:none, since
+   some bots skip fields that are display:none. */
+.hp { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 .sent { color: var(--ok); text-align: center; font-weight: 600; }
 .game-name { font-weight: 600; margin: 0 0 4px; }
 

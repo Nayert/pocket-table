@@ -163,6 +163,7 @@ class OnlineTransport implements Transport {
   String _reason(Object? r) => switch (r) {
         'version_mismatch' => 'The relay server runs a different protocol version. Update the app or the server.',
         'server_full' => 'The relay server is full. Try again later.',
+        'rate_limited' => 'Too many rooms were opened from this network. Wait a few minutes and try again.',
         'room_not_found' => 'The room has expired.',
         _ => 'The relay server refused the room ($r).',
       };

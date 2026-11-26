@@ -50,7 +50,7 @@ Nothing — it's a document. Every other layer depends on it, so change it caref
 |------|-----------|---------|
 | `join` | player → host | `{ v, room, name, reconnectToken? }` |
 | `join.ok` | host → player | `{ playerId, reconnectToken, protocolVersion }` |
-| `join.error` | host/relay → player | `{ reason: "room_not_found" \| "room_full" \| "name_taken" \| "bad_name" \| "version_mismatch" \| "game_in_progress" }` |
+| `join.error` | host/relay → player | `{ reason: "room_not_found" \| "room_full" \| "name_taken" \| "bad_name" \| "version_mismatch" \| "game_in_progress" \| "rate_limited" }` (`rate_limited` comes from the relay: too many joins or wrong codes from one network) |
 | `leave` | player → host | `{}` |
 | `room.closed` | host/relay → player, relay → host | `{ reason: "host_left" \| "kicked" \| "expired" }` (the relay also tells the host when it expires the room) |
 
@@ -64,7 +64,7 @@ Players connect to `/ws/player?room=CODE` on whatever served the page (the relay
 | `room.created` | relay → host | `{ room, hostToken, joinUrl, maxPlayers }` |
 | `room.resume` | host → relay | `{ room, hostToken }` (after the host's connection drops) |
 | `room.resumed` | relay → host | `{ room, joinUrl, players: [connId] }` |
-| `room.error` | relay → host | `{ reason: "version_mismatch" \| "server_full" \| "room_not_found" }` |
+| `room.error` | relay → host | `{ reason: "version_mismatch" \| "server_full" \| "room_not_found" \| "rate_limited" }` |
 | `player.joined` / `player.left` | relay → host | `{ connId }` |
 | `player.close` | host → relay | `{ connId }` (drop a connection) |
 | `host.disconnected` / `host.reconnected` | relay → players | `{}` |

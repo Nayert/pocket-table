@@ -5,7 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#14161c">
   <meta name="color-scheme" content="dark">
+  <meta name="description" content="Join a Party Games room from your phone: type the room code from the host's screen and your name.">
   <title>Party Games</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -41,6 +45,12 @@
                autocapitalize="words" spellcheck="false" enterkeyhint="go"
                aria-describedby="name-hint" required>
         <p id="name-hint" class="hint">Up to 16 characters.</p>
+        <!-- Spam trap: hidden from people and screen readers, but simple bots
+             fill in every field. If it has a value, the join is ignored. -->
+        <div class="hp" aria-hidden="true">
+          <label for="website-input">Website</label>
+          <input id="website-input" name="website" type="text" tabindex="-1" autocomplete="off">
+        </div>
         <button id="join-btn" class="btn primary" type="submit">Join</button>
         <p id="join-error" class="error" role="alert" aria-live="assertive"></p>
       </form>

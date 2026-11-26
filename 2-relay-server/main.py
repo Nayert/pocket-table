@@ -8,15 +8,19 @@ Run locally:   uvicorn main:app --host 0.0.0.0 --port 8000
 import asyncio
 import json
 import os
+import re
 import secrets
 import time
+from xml.sax.saxutils import escape
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from rooms import Room, RoomManager
+from protect import ForceHTTPSMiddleware, RateLimiter, client_ip
+from rooms import CODE_ALPHABET, CODE_LENGTH, Room, RoomManager
 
 PROTOCOL_VERSION = 1
 
@@ -31,8 +35,29 @@ FIRST_MESSAGE_TIMEOUT = 10.0
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 PLAYER_CLIENT_DIR = Path(os.getenv(
     "PLAYER_CLIENT_DIR", Path(__file__).resolve().parent.parent / "1-player-client"))
+# Redirect http:// to https:// (only when a proxy like Render says the request
+# came in as http, so local testing is unaffected). Set to 0 to turn it off.
+FORCE_HTTPS = os.getenv("FORCE_HTTPS", "1") != "0"
+
+# ---- spam protection (per visitor IP; a whole party on one Wi-Fi shares an
+# IP, so these are generous for people and tight for scripts) ----
+JOINS_PER_MINUTE = int(os.getenv("JOINS_PER_MINUTE", "60"))
+BAD_CODES_PER_MINUTE = int(os.getenv("BAD_CODES_PER_MINUTE", "15"))
+ROOMS_PER_10_MINUTES = int(os.getenv("ROOMS_PER_10_MINUTES", "20"))
+PLAYER_MESSAGES_PER_10S = int(os.getenv("PLAYER_MESSAGES_PER_10S", "40"))
 
 manager = RoomManager(MAX_ROOMS, MAX_PLAYERS_PER_ROOM)
+join_limiter = RateLimiter(JOINS_PER_MINUTE, 60)
+bad_code_limiter = RateLimiter(BAD_CODES_PER_MINUTE, 60)
+room_limiter = RateLimiter(ROOMS_PER_10_MINUTES, 600)
+LIMITERS = (join_limiter, bad_code_limiter, room_limiter)
+ROOM_CODE_RE = re.compile(f"^[{CODE_ALPHABET}]{{{CODE_LENGTH}}}$")
+
+
+def valid_code(raw: str | None) -> str | None:
+    """The room code in upper case if it looks like a real one, else None."""
+    code = (raw or "").strip().upper()
+    return code if ROOM_CODE_RE.match(code) else None
 
 
 def envelope(type_: str, payload: dict | None = None, to: str = "host") -> str:
@@ -72,6 +97,8 @@ async def cleanup_loop() -> None:
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
         for room in manager.expired(HOST_GRACE_SECONDS, IDLE_TIMEOUT_SECONDS):
             await close_room(room, "expired")
+        for limiter in LIMITERS:
+            limiter.forget_idle()
 
 
 @asynccontextmanager
@@ -81,7 +108,16 @@ async def lifespan(_: FastAPI):
     task.cancel()
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(ForceHTTPSMiddleware, enabled=FORCE_HTTPS, public_url=PUBLIC_URL)
+
+
+def site_base(request: Request) -> str:
+    """The public https address of this site, for robots.txt and the sitemap."""
+    if PUBLIC_URL:
+        return PUBLIC_URL
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    return f"{proto}://{request.headers.get('host', 'localhost')}"
 
 
 def join_url_for(ws: WebSocket, code: str) -> str:
@@ -114,6 +150,40 @@ async def health():
     return {"ok": True, "rooms": len(manager.rooms), "protocol": PROTOCOL_VERSION}
 
 
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots(request: Request):
+    return (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /ws/\n"
+        "Disallow: /health\n"
+        "\n"
+        f"Sitemap: {site_base(request)}/sitemap.xml\n"
+    )
+
+
+@app.get("/sitemap.xml")
+async def sitemap(request: Request):
+    # Only the join page is public; room links (/?room=...) are short-lived.
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"  <url><loc>{escape(site_base(request))}/</loc><changefreq>monthly</changefreq></url>\n"
+        "</urlset>\n"
+    )
+    return Response(xml, media_type="application/xml")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # Browsers ask for /favicon.ico on their own, so answer it from the page folder.
+    path = PLAYER_CLIENT_DIR / "favicon.ico"
+    if not path.is_file():
+        return Response(status_code=404)
+    return FileResponse(path, media_type="image/x-icon",
+                        headers={"cache-control": "public, max-age=604800"})
+
+
 @app.websocket("/ws/host")
 async def host_socket(ws: WebSocket):
     await ws.accept()
@@ -130,6 +200,10 @@ async def host_socket(ws: WebSocket):
     room: Room | None = None
 
     if first.get("type") == "room.create":
+        if not room_limiter.hit(client_ip(ws.headers, ws.client and ws.client.host)):
+            await safe_send(ws, envelope("room.error", {"reason": "rate_limited"}))
+            await safe_close(ws)
+            return
         if payload.get("v", first.get("v")) != PROTOCOL_VERSION:
             await safe_send(ws, envelope("room.error", {"reason": "version_mismatch",
                                                         "protocolVersion": PROTOCOL_VERSION}))
@@ -197,17 +271,28 @@ async def broadcast(room: Room, text: str) -> None:
         await safe_send(ws, text)
 
 
+async def reject_player(ws: WebSocket, reason: str) -> None:
+    await safe_send(ws, envelope("join.error", {"reason": reason}, to="player"))
+    await safe_close(ws)
+
+
 @app.websocket("/ws/player")
 async def player_socket(ws: WebSocket):
     await ws.accept()
-    room = manager.get(ws.query_params.get("room"))
+    ip = client_ip(ws.headers, ws.client and ws.client.host)
+    # Too many wrong codes in a row looks like someone guessing room codes,
+    # so they're paused for a minute even if the next code is right.
+    if bad_code_limiter.blocked(ip) or not join_limiter.hit(ip):
+        await reject_player(ws, "rate_limited")
+        return
+    code = valid_code(ws.query_params.get("room"))
+    room = manager.get(code) if code else None
     if room is None:
-        await safe_send(ws, envelope("join.error", {"reason": "room_not_found"}, to="player"))
-        await safe_close(ws)
+        bad_code_limiter.hit(ip)
+        await reject_player(ws, "room_not_found")
         return
     if room.full:
-        await safe_send(ws, envelope("join.error", {"reason": "room_full"}, to="player"))
-        await safe_close(ws)
+        await reject_player(ws, "room_full")
         return
 
     conn_id = "c_" + secrets.token_hex(4)
@@ -217,10 +302,20 @@ async def player_socket(ws: WebSocket):
     if room.host is None:
         await safe_send(ws, envelope("host.disconnected", to=conn_id))
 
+    messages = RateLimiter(PLAYER_MESSAGES_PER_10S, 10)
+    dropped = 0
     try:
         while True:
             msg = await receive_json(ws)
             if msg is None:
+                continue
+            if not messages.hit(conn_id):
+                # A real player taps a few times a second at most. Drop the
+                # flood, and hang up on a client that keeps going.
+                dropped += 1
+                if dropped > PLAYER_MESSAGES_PER_10S:
+                    await safe_close(ws, 1008)
+                    break
                 continue
             room.touch()
             msg["from"] = conn_id  # players can't pretend to be someone else

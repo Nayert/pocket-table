@@ -47,6 +47,7 @@
 2-relay-server/
   main.py           # FastAPI app: /ws/host, /ws/player, /health, serves the player page at /
   rooms.py          # Room + RoomManager: codes, capacity, idle/host-gone expiry
+  protect.py        # HTTPS redirect middleware and per-IP rate limiter
   test_relay.py     # pytest tests (create, join, forward, full room, resume, version check)
   requirements.txt
 ```
@@ -63,7 +64,16 @@ uvicorn main:app --host 0.0.0.0 --port 8000        # start it
 
 Open `http://localhost:8000/health` to check it's up. In the host app choose **Online** and enter `http://<this computer's IP>:8000` to test on your own network.
 
-Settings (environment variables): `MAX_ROOMS`, `MAX_PLAYERS_PER_ROOM` (20), `MAX_MESSAGE_BYTES` (16384), `HOST_GRACE_SECONDS` (120), `IDLE_TIMEOUT_SECONDS` (1800), `PUBLIC_URL` (set this when deployed so join links use your real https address), `PLAYER_CLIENT_DIR`.
+Settings (environment variables): `MAX_ROOMS`, `MAX_PLAYERS_PER_ROOM` (20), `MAX_MESSAGE_BYTES` (16384), `HOST_GRACE_SECONDS` (120), `IDLE_TIMEOUT_SECONDS` (1800), `PUBLIC_URL` (set this when deployed so join links use your real https address), `PLAYER_CLIENT_DIR`, `FORCE_HTTPS` (1).
+
+Spam protection (per visitor IP, so a whole party on one Wi-Fi shares the allowance): `JOINS_PER_MINUTE` (60), `BAD_CODES_PER_MINUTE` (15, after that even a right code is refused for up to a minute, which stops people guessing codes), `ROOMS_PER_10_MINUTES` (20), `PLAYER_MESSAGES_PER_10S` (40 per player; extra messages are dropped and a client that keeps flooding is disconnected). Refusals use the reason `rate_limited`.
+
+### The public website
+
+- `http://` requests are redirected to `https://` when Render's proxy marks them as http (`X-Forwarded-Proto`), and https responses carry an HSTS header. Locally nothing changes.
+- Unknown addresses get `1-player-client/404.html` with a 404 status.
+- `/robots.txt` and `/sitemap.xml` are generated from `PUBLIC_URL` (or the request's address). Only the join page is listed; `/ws/` and `/health` are disallowed.
+- `/favicon.ico` is served from the player page folder. FastAPI's `/docs` pages are turned off.
 
 ### Deploying
 

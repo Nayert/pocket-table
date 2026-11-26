@@ -163,7 +163,13 @@ class LocalTransport implements Transport {
     final res = req.response;
     if (bytes == null) {
       res.statusCode = HttpStatus.notFound;
-      res.write('Not found');
+      final page = await loadAsset('404.html');
+      if (page != null) {
+        res.headers.set(HttpHeaders.contentTypeHeader, _types['html']!);
+        res.add(page);
+      } else {
+        res.write('Not found');
+      }
     } else {
       final ext = path.split('.').last.toLowerCase();
       res.headers.set(HttpHeaders.contentTypeHeader, _types[ext] ?? 'application/octet-stream');
